@@ -156,3 +156,35 @@ test('old-job cleanup archives before deleting, preserves profiles and confirmed
     assert.equal(archived.length, 2);
   } finally { global.fetch = original; }
 });
+
+test('one failed schedule lookup does not discard other verified active jobs or claim complete coverage', async () => {
+  const original = global.fetch;
+  try {
+    const service = load();
+    const upstream = api([live], [{ jobId }, { jobId: 'JOB-UK-FAILED' }]);
+    global.fetch = async (url, init) => {
+      if (init?.body && JSON.parse(init.body).variables?.searchScheduleRequest?.jobId === 'JOB-UK-FAILED') return Response.json({ errors: [{ message: 'Temporarily unavailable' }] });
+      return upstream(url, init);
+    };
+    const result = await service.fetchAllUKHourlyJobs();
+    assert.equal(result.jobs.length, 1);
+    assert.equal(result.jobs[0].scheduleId, 'live');
+    assert.equal(result.unverifiedJobs, 1);
+    assert.equal((await service.fetchAllUKHourlyJobs()).unverifiedJobs, 1);
+    const response = await service.handleJobsFallback({ nextUrl: new URL('https://example.invalid/api/jobs') });
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.jobFeed.complete, false);
+    assert.match(body.availabilityWarning, /verified active jobs only/);
+  } finally { global.fetch = original; }
+});
+
+test('total schedule service failure remains an error and does not become an empty live feed', async () => {
+  const original = global.fetch;
+  try {
+    const service = load();
+    const upstream = api([live]);
+    global.fetch = async (url, init) => init?.body && JSON.parse(init.body).operationName === 'searchScheduleCards' ? Response.json({ errors: [{ message: 'Unavailable' }] }) : upstream(url, init);
+    await assert.rejects(service.fetchAllUKHourlyJobs(), /could not be verified/);
+  } finally { global.fetch = original; }
+});

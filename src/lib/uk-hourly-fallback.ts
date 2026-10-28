@@ -181,6 +181,7 @@ let cachedTokenExpiresAt = 0;
 let cachedJobs: HourlyJob[] | null = null;
 let cachedJobsExpiresAt = 0;
 let cachedFetchedAt: string | null = null;
+let cachedUnverifiedJobs = 0;
 const scheduleCache = new Map<
   string,
   { cards: RawScheduleCard[]; expiresAt: number }
@@ -428,10 +429,11 @@ function normaliseJob(
 export async function fetchAllUKHourlyJobs(): Promise<{
   jobs: HourlyJob[];
   fetchedAt: string;
+  unverifiedJobs: number;
 }> {
   const now = Date.now();
   if (cachedJobs && cachedFetchedAt && now < cachedJobsExpiresAt) {
-    return { jobs: cachedJobs.filter(job => !wasRejected(job.id, job.scheduleId)), fetchedAt: cachedFetchedAt };
+    return { jobs: cachedJobs.filter(job => !wasRejected(job.id, job.scheduleId)), fetchedAt: cachedFetchedAt, unverifiedJobs: cachedUnverifiedJobs };
   }
 
   let token = await getHvhToken(false);
@@ -503,21 +505,31 @@ export async function fetchAllUKHourlyJobs(): Promise<{
 
   const map = new Map<string, HourlyJob>();
   const unique = Array.from(new Map(rawList.map((raw) => [String(raw.jobId || raw.id), raw])).values());
+  let unverifiedJobs = 0;
+  let firstFailure: unknown;
   // Bound requests while verifying every job, including jobs with stale summary counts.
   for (let offset = 0; offset < unique.length; offset += 8) {
-    const verified = await Promise.all(unique.slice(offset, offset + 8).map(async (raw) => {
+    const verified = await Promise.allSettled(unique.slice(offset, offset + 8).map(async (raw) => {
       const id = String(raw.jobId || raw.id || "");
       const schedules = await fetchSchedulesForJob(id);
       return schedules.length ? normaliseJob(raw, schedules) : null;
     }));
-    for (const job of verified) if (job) map.set(job.id, job);
+    for (const result of verified) {
+      if (result.status === "fulfilled") { if (result.value) map.set(result.value.id, result.value); }
+      else { unverifiedJobs++; firstFailure ??= result.reason; }
+    }
+  }
+  // A partial response may contain verified shifts, but never present total failure as zero vacancies.
+  if (unique.length > 0 && unverifiedJobs === unique.length) {
+    throw firstFailure instanceof Error ? firstFailure : new Error("Amazon's live shift checks are temporarily unavailable. Please retry.");
   }
   const jobs = Array.from(map.values());
   const fetchedAt = new Date().toISOString();
   cachedJobs = jobs;
   cachedFetchedAt = fetchedAt;
+  cachedUnverifiedJobs = unverifiedJobs;
   cachedJobsExpiresAt = Date.now() + 8_000;
-  return { jobs, fetchedAt };
+  return { jobs, fetchedAt, unverifiedJobs };
 }
 
 // ── Matcher helpers ──────────────────────────────────────────────────────────
@@ -1095,7 +1107,7 @@ export async function removeUnavailableStoredJobs(): Promise<{ removed: number; 
 
 export async function handleJobsFallback(req: NextRequest): Promise<Response> {
   try {
-    const [{ jobs: rawJobs, fetchedAt }, prefs, storedApplied] =
+    const [{ jobs: rawJobs, fetchedAt, unverifiedJobs }, prefs, storedApplied] =
       await Promise.all([
         fetchAllUKHourlyJobs(),
         loadActivePreferences(req),
@@ -1166,8 +1178,10 @@ export async function handleJobsFallback(req: NextRequest): Promise<Response> {
           provider: "jobsatamazon.co.uk",
           stale: false,
           fetchedAt,
-          complete: true,
+          complete: unverifiedJobs === 0,
+          unverifiedJobs,
         },
+        availabilityWarning: unverifiedJobs > 0 ? "Some Amazon shifts could not be checked. Showing verified active jobs only." : null,
       },
       { headers: { "Cache-Control": "no-store" } }
     );

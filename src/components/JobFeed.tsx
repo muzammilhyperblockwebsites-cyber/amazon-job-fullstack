@@ -53,6 +53,7 @@ interface FeedResponse {
   page: number;
   totalPages: number;
   source: "live" | "db" | "cache";
+  availabilityWarning?: string | null;
 }
 
 export interface JobFeedHandle {
@@ -69,6 +70,7 @@ const JobFeed = forwardRef<JobFeedHandle>((_, ref) => {
   const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(false);
   const [feedError, setFeedError] = useState<string | null>(null);
+  const [availabilityWarning, setAvailabilityWarning] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<FeedTab>("all");
   const [minScore, setMinScore] = useState(0);
@@ -129,6 +131,7 @@ const JobFeed = forwardRef<JobFeedHandle>((_, ref) => {
         {
           const data: FeedResponse = await readApiResponse(res);
           setFeedError(null);
+          setAvailabilityWarning(data.availabilityWarning ?? null);
           setJobs(data.jobs);
           if (Array.isArray(data.storedAppliedJobs)) {
             setStoredAppliedJobs(data.storedAppliedJobs);
@@ -278,6 +281,7 @@ const JobFeed = forwardRef<JobFeedHandle>((_, ref) => {
   return (
     <div>
       {feedError && <p role="alert" className="border border-red-200 bg-red-50 text-red-800 rounded-lg p-3 mb-3">{feedError}</p>}
+      {!feedError && availabilityWarning && <p role="status" className="border border-amber-200 bg-amber-50 text-amber-900 rounded-lg p-3 mb-3">{availabilityWarning}</p>}
       {/* Controls */}
       <div className="flex flex-wrap gap-2 items-center mb-3">
         <button
