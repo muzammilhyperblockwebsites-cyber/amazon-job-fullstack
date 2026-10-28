@@ -1,0 +1,101 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// Stores ONLY the IDs of jobs we've already seen
+// This lets us detect truly new jobs on each poll
+model SeenJob {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  jobId     String   @unique   // Amazon's numeric ID
+  firstSeen DateTime @default(now())
+
+  @@index([firstSeen])
+}
+
+// Stores ONLY jobs the user has applied to or that matched filters
+// These are worth keeping permanently
+model AppliedJob {
+  id                String    @id @default(auto()) @map("_id") @db.ObjectId
+  jobId             String    @unique
+  title             String
+  location          String
+  category          String    @default("")
+  jobType           String    @default("")
+  applyUrl          String
+  matchScore        Int
+  appliedAt         DateTime  @default(now())
+  applicationStatus String    @default("opened") // opened | applied | skipped
+  notes             String    @default("")
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([appliedAt])
+  @@index([matchScore])
+}
+
+// User preferences, filters & Tool Auth Credentials
+model UserPreferences {
+  id                String   @id @default(auto()) @map("_id") @db.ObjectId
+  locations         String[] @default([])
+  radius            Int      @default(25)
+  keywords          String[] @default([])
+  categories        String[] @default([])
+  jobTypes          String[] @default([])
+  excludeKeywords   String[] @default([])
+  minMatchScore     Int      @default(0)
+  postedWithinHours Int      @default(0)
+  remoteOnly        Boolean  @default(false)
+  autoApplyEnabled  Boolean  @default(false)
+  autoApplyMinScore Int      @default(80)
+  // Tool Login Credentials stored in Prisma (MongoDB)
+  amazonEmail       String   @default("")
+  amazonPassword    String   @default("")
+  emailEnabled      Boolean  @default(false)
+  emailAddress      String   @default("")
+  emailMinScore     Int      @default(50)
+  browserNotify     Boolean  @default(true)
+  pollIntervalMins  Int      @default(2)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+
+
+model AuthSession {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  tokenHash String   @unique
+  email     String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  @@index([expiresAt])
+}
+model AuthRateLimit {
+  id        String   @id @map("_id")
+  attempts  Int
+  expiresAt DateTime
+  @@index([expiresAt])
+}
+
+model WorkerTask {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  owner     String
+  action    String
+  payload   String
+  result    String   @default("")
+  status    String   @default("queued")
+  startedAt DateTime?
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  @@index([status, createdAt])
+  @@index([expiresAt])
+}
+model BrowserSession {
+  id        String   @id @map("_id")
+  payload   String
+  updatedAt DateTime @updatedAt
+}

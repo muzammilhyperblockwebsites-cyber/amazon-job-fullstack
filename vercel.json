@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "buildCommand": "npm run build",
+  "installCommand": "npm ci",
+  "env": {
+    "APP_URL": "https://amazon-job-apply.vercel.app",
+    "BACKEND_URL": "https://amazon-job-1c0aa8c12f46.herokuapp.com"
+  }
+}
