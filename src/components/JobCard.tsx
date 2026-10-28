@@ -79,14 +79,12 @@ export default function JobCard({ job }: { job: Job }) {
   const [error, setError] = useState("");
   const applied = status === "applied";
   async function openApplication() {
-    const tab = window.open("about:blank", "_blank");
     setLoading(true);
     setError("");
     try {
-      await launchApplication({ ...job, id: job.jobId || job.id }, tab);
-      setStatus("helper_started");
+      await launchApplication({ ...job, id: job.jobId || job.id });
+      setStatus("browser_started");
     } catch (err) {
-      tab?.close();
       setError(
         err instanceof Error ? err.message : "Activity could not be saved"
       );
@@ -127,7 +125,7 @@ export default function JobCard({ job }: { job: Job }) {
             ? "Saved application activity — check progress on Amazon"
             : applied
             ? "✅ Submission verified"
-            : "Helper started — view progress in the Amazon tab"}
+            : "View progress in the tool's Amazon browser"}
         </p>
       )}
       {error && (
@@ -142,7 +140,7 @@ export default function JobCard({ job }: { job: Job }) {
         className="rounded-lg bg-orange-500 hover:bg-orange-600 text-white font-semibold text-sm px-4 py-2 disabled:opacity-50 cursor-pointer"
       >
         {loading
-          ? "Checking shift & preparing helper…"
+          ? "Checking shift & opening Amazon browser…"
           : "Apply automatically to assessment"}
       </button>
     </article>

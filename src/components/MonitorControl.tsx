@@ -11,6 +11,7 @@ import { readApiResponse } from "@/lib/api-response";
 import { useSSE, type SSEJobEvent } from "@/hooks/useSSE";
 import { useNotifications } from "@/hooks/useNotifications";
 import { launchApplication } from "@/lib/application-launch";
+import ApplicationProgress from "./ApplicationProgress";
 
 export interface MonitorControlHandle {
   pollAndAutoOpenBestMatch: (
@@ -83,7 +84,6 @@ const MonitorControl = forwardRef<
   const notifiedIds = useRef(new Set<string>());
   const autoOpenedIds = useRef(new Set<string>());
   const polling = useRef(false);
-  const autoApplyTab = useRef<Window | null>(null);
   const { notify, requestPermission } = useNotifications();
 
   const refresh = useCallback(async () => {
@@ -134,32 +134,11 @@ const MonitorControl = forwardRef<
         });
         setJobs(result.jobs || []);
         const best = result.bestMatchJob;
-        if (
-          preOpenedTab &&
-          !preOpenedTab.closed &&
-          best?.id
-        ) {
-          setMessage(await launchApplication(best, preOpenedTab));
+        preOpenedTab?.close();
+        const shouldStart = best?.id && (!isBackground || (autoEnabled && (best.matchScore ?? 0) >= 100 && !autoOpenedIds.current.has(`${best.id}:${best.scheduleId}`)));
+        if (shouldStart) {
+          setMessage(await launchApplication(best));
           autoOpenedIds.current.add(`${best.id}:${best.scheduleId}`);
-        } else {
-          preOpenedTab?.close();
-          if (
-            autoEnabled &&
-            best?.id &&
-            (best.matchScore ?? 0) >= 100 &&
-            best.applyUrl &&
-            officialUrl(best.applyUrl) &&
-            !autoOpenedIds.current.has(`${best.id}:${best.scheduleId}`)
-          ) {
-            const target = autoApplyTab.current;
-            if (!target || target.closed) throw new Error("Enable automatic preparation again to open an application tab. Allow pop-ups for this dashboard.");
-            if (autoOpenedIds.current.size > 0) {
-              setMessage("Another matching shift was found. Finish the current application, then click Check & Apply for the next one.");
-            } else {
-              setMessage(await launchApplication(best, target));
-              autoOpenedIds.current.add(`${best.id}:${best.scheduleId}`);
-            }
-          }
         }
         if (!best) setMessage("No matching live shifts are available. Monitoring will keep checking.");
         onNewJobs?.();
@@ -188,9 +167,7 @@ const MonitorControl = forwardRef<
   useImperativeHandle(ref, () => ({ pollAndAutoOpenBestMatch: poll }), [poll]);
 
   async function toggleAutoApply() {
-    const opened = !autoEnabled ? window.open("about:blank", "_blank") : null;
     try {
-      if (!autoEnabled && !opened) throw new Error("Allow pop-ups, then enable automatic preparation again.");
       const data = await jsonRequest("/api/preferences", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -198,19 +175,14 @@ const MonitorControl = forwardRef<
       });
       setAutoEnabled(Boolean(data.autoApplyEnabled));
       if (data.autoApplyEnabled) {
-        autoApplyTab.current = opened;
         autoOpenedIds.current.clear();
-      } else {
-        // Do not close or overwrite a running Amazon application.
-        autoApplyTab.current = null;
       }
       setMessage(
         data.autoApplyEnabled
-          ? "Automatic preparation enabled. Keep the application tab open; the first 100% match starts with your saved profile."
+          ? "Automatic preparation enabled. The first 100% match starts in the tool's Amazon browser."
           : "Automatic preparation disabled."
       );
     } catch (error) {
-      opened?.close();
       setMessage(
         error instanceof Error ? error.message : "Preferences were not saved"
       );
@@ -231,8 +203,7 @@ const MonitorControl = forwardRef<
         <button
           type="button"
           onClick={() => {
-            const tab = window.open("about:blank", "_blank");
-            void poll(tab, false);
+            void poll(null, false);
           }}
           disabled={busy}
           className="bg-orange-500 hover:bg-orange-600 text-white font-semibold rounded-lg px-4 py-2 disabled:opacity-50 cursor-pointer"
@@ -278,34 +249,15 @@ const MonitorControl = forwardRef<
 
       <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900 flex flex-wrap items-center justify-between gap-2">
         <div>
-          <strong>Application helper v4 required:</strong>{" "}
-          Install one helper below, reload the dashboard, and save your candidate
-          profile. It fills known fields and continues using Amazon&apos;s controls.
-          Keep the Amazon tab open. Unknown questions, login, OTP, CAPTCHA,
-          assessment and final submission need your input.
-        </div>
-        <div className="flex items-center gap-2">
-          <a
-            href="/amazon-uk-auto-agree.user.js"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="bg-orange-500 hover:bg-orange-600 text-white font-semibold px-3 py-1.5 rounded-lg"
-          >
-            Install Tampermonkey Script
-          </a>
-          <a
-            href="/amazon-auto-agree-extension.zip"
-            download
-            className="bg-gray-800 hover:bg-gray-900 text-white font-semibold px-3 py-1.5 rounded-lg"
-          >
-            Download Chrome Extension (.zip)
-          </a>
+          <strong>Built-in Amazon browser:</strong>{" "}
+          No extension or userscript installation. Save your profile, then click Apply.
+          The tool checks the shift, clicks I Agree and continues to assessment.
+          Sign in once in its Amazon browser if requested. OTP/CAPTCHA and unknown
+          questions pause automation.
         </div>
       </div>
 
-      <a href="https://www.jobsatamazon.co.uk/app#/login" target="_blank" rel="noopener noreferrer" className="inline-block text-sm text-blue-700 underline">
-        Sign in directly on Amazon before applying
-      </a>
+      <ApplicationProgress />
 
       {message && (
         <p role="status" className="text-sm text-gray-700">

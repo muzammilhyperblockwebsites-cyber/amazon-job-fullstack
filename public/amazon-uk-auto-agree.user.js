@@ -14,13 +14,14 @@
 // @grant        GM_deleteValue
 // ==/UserScript==
 
-/* global GM_getValue, GM_setValue, GM_deleteValue */
+/* global GM_getValue, GM_setValue, GM_deleteValue, managedLaunch */
 (function () {
   "use strict";
   if (globalThis.__amazonMonitorHelperV4) return;
   globalThis.__amazonMonitorHelperV4 = true;
   const STORAGE_PREFIX = "agm-launch:";
   const TTL = 30 * 60 * 1000;
+  const managed = typeof managedLaunch !== "undefined" ? managedLaunch : null;
   const isAmazon = /^(www\.)?jobsatamazon\.co\.uk$/.test(location.hostname);
   const isDashboard = location.origin === "https://amazon-job-apply.vercel.app" || /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
   const storage = {
@@ -70,9 +71,15 @@
   const clicks = new WeakMap();
   const changed = new WeakSet();
   let verifiedAt = 0;
-  function say(message) {
+  let stopped = false;
+  window.addEventListener("amazon-monitor-stop", () => {
+    stopped = true;
+    if (launch) sessionStorage.setItem("agm-stopped", `${launch.jobId}:${launch.scheduleId}`);
+    say("Automation stopped. No application was withdrawn.", "stopped");
+  });
+  function say(message, stage = "running") {
     if (!document.body) return;
-    if (!panel) {
+    if (!panel || !panel.isConnected) {
       panel = document.createElement("aside");
       panel.id = "amazon-monitor-helper-status";
       panel.setAttribute("role", "status");
@@ -80,6 +87,7 @@
       document.body.append(panel);
     }
     if (panel.textContent !== message) panel.textContent = message;
+    panel.dataset.stage = stage;
   }
   function visible(element) {
     if (!element || element.closest("#amazon-monitor-helper-status") || element.hidden || element.closest('[hidden],[aria-hidden="true"]')) return false;
@@ -178,6 +186,21 @@
     if (!response.ok || result.errors?.length || !Array.isArray(result.data?.searchScheduleCards?.scheduleCards)) throw new Error("Live shift could not be verified. Retry shortly.");
     const found = result.data.searchScheduleCards.scheduleCards.some(card => card.scheduleId === launch.scheduleId && (!card.jobId || card.jobId === launch.jobId) && card.laborDemandAvailableCount > 0 && (!card.hireStartDate || card.hireStartDate.slice(0, 10) >= today));
     if (!found) throw new Error("Selected shift is no longer available. Return to the dashboard and choose another shift.");
+    // The application service checks ACTIVE status separately from the public search count.
+    // Use this browser's own Amazon login only on Amazon's own origin.
+    if (managed) {
+      const accessToken = localStorage.getItem("accessToken");
+      if (!accessToken) { say("Sign in once in this Amazon browser. The tool will resume automatically.", "waiting_login"); return false; }
+      const detail = await fetch(`/application/api/job/get-schedule-details/${encodeURIComponent(launch.scheduleId)}?locale=en-GB`, {
+        credentials: "include", cache: "no-store", headers: { Authorization: accessToken, "bb-ui-version": "bb-ui-v2" }, signal: AbortSignal.timeout(10000),
+      });
+      if (detail.status === 401 || detail.status === 403) { say("Complete Amazon sign-in or verification. The tool will resume afterwards.", "waiting_login"); return false; }
+      if (!detail.ok) throw new Error("Amazon could not verify the selected shift. Retry when its application service is available.");
+      const schedule = await detail.json();
+      if (schedule.status !== "ACTIVE" || (schedule.scheduleId && schedule.scheduleId !== launch.scheduleId) || (schedule.jobId && schedule.jobId !== launch.jobId)) {
+        say("Amazon's application service reports this shift unavailable. It has not been reserved; choose another live shift.", "shift_unavailable"); stopped = true; return false;
+      }
+    }
     verifiedAt = Date.now();
     return true;
   }
@@ -196,7 +219,7 @@
     return true;
   }
   async function tick() {
-    if (running || !launch || !document.body) return;
+    if (stopped || running || !launch || !document.body) return;
     running = true;
     try {
       if (Date.now() >= launch.expiresAt) { sessionStorage.removeItem("agm-active"); say("Application helper session expired. Start again from the dashboard."); launch = null; return; }
@@ -208,43 +231,59 @@
       const route = (location.pathname + location.hash.split("?")[0]).toLowerCase();
       if (route !== routeKey) { routeKey = route; routeClicks = 0; }
       const body = document.body.cloneNode(true);
-      body.querySelector("#amazon-monitor-helper-status")?.remove();
+      body.querySelectorAll("script,style,template,noscript,#amazon-monitor-helper-status").forEach(element => element.remove());
       const bodyText = (body.innerText || body.textContent || "").toLowerCase();
       if (/assessment/.test(route) || document.querySelector("#assessment-video") || /start assessment|begin assessment|read assessment instructions|evaluate your fit at amazon/.test(bodyText)) {
-        say("Assessment reached. Complete the assessment yourself; automatic actions have stopped."); return;
+        say("Assessment reached. Complete the assessment yourself; automatic actions have stopped.", "assessment_ready"); stopped = true; return;
       }
       if (Array.from(document.querySelectorAll('input[type="password"],input[autocomplete="one-time-code"],iframe[src*="captcha"],iframe[title*="CAPTCHA"]')).some(visible) || /captcha|login|signin|sign-in/.test(route)) {
-        say("Complete Amazon sign-in, verification or CAPTCHA. The helper will resume afterwards."); return;
+        say("Complete Amazon sign-in, verification or CAPTCHA. The tool will resume afterwards.", "waiting_login"); return;
       }
-      if (/shift.*(no longer available|expired)|no shifts available/.test(bodyText)) { say("Shift unavailable. Return to the dashboard for live shifts."); return; }
+      if (managed && !location.pathname.startsWith("/application/uk")) { say("Waiting for Amazon to return to the selected application.", "waiting_login"); return; }
+      const visibleMessages = Array.from(document.querySelectorAll('[role="alert"],h1,h2,p,[data-test-id*="error"]')).filter(visible).map(text).join(" ");
+      if (/(shift|schedule).*(no longer available|unavailable|expired)|no (shifts|schedules) available/.test(visibleMessages)) { say("Amazon reports this shift unavailable. It has not been reserved; choose another live shift.", "shift_unavailable"); stopped = true; return; }
       const profile = launch.profile;
       if (profile.aiFormFillerEnabled === false) { say("Form filling is disabled in your saved profile."); return; }
       completeFields(profile);
       if (profile.autoClickNextEnabled === false) { say("Saved details filled. Automatic Next is disabled."); return; }
-      const errors = Array.from(document.querySelectorAll('[role="alert"],[aria-invalid="true"]')).filter(visible);
-      if (errors.length) { say("Resolve the validation message on Amazon. The helper will resume afterwards."); return; }
+      const errors = Array.from(document.querySelectorAll('[role="alert"],[aria-invalid="true"]')).filter(element => visible(element) && (text(element) || element.getAttribute("aria-invalid") === "true"));
+      if (errors.length) { say("Resolve the validation message on Amazon. The tool will resume afterwards.", "needs_input"); return; }
       const buttons = Array.from(document.querySelectorAll('button,input[type="submit"],[role="button"]')).filter(visible);
       const final = buttons.find(button => /^(submit( application)?|finish( application)?|accept( job)? offer|withdraw( application)?)$/.test(text(button)));
-      if (final) { say("Final application step reached. Review your details and submit yourself."); return; }
+      if (final) { say("Final application step reached. Review your details and submit yourself.", "needs_input"); return; }
       // Use Amazon's controls, never mutate its feature flags, requests or assessment state.
-      const candidate = buttons.find(button => /^(start( application| my application)?|apply( now)?|continue( application| applying)?|next|save (and|&) continue|i agree|agree and continue|confirm shift|select shift)$/.test(text(button)) || button.id === "startApplicationButton");
+      const integrity = document.querySelector('[data-test-id="integrity-notice-agree-button"], [data-testid="integrity-notice-agree-button"]');
+      const candidate = (visible(integrity) ? integrity : null) || buttons.find(button => !button.disabled && button.getAttribute("aria-disabled") !== "true" && (/^(start( application| my application)?|apply( now)?|continue( application| applying)?|next|save (and|&) continue|i agree|agree and continue|confirm shift|select shift)$/.test(text(button)) || button.id === "startApplicationButton"));
       if (!candidate) { say("Waiting for Amazon. Complete any unanswered question or choose your saved shift to continue."); return; }
       if (/job-opportunities|schedule|shift-selection/.test(route)) {
         const selected = Array.from(document.querySelectorAll('[aria-checked="true"],[aria-selected="true"],input:checked')).find(element => element.getAttribute("data-schedule-id") === launch.scheduleId || element.value === launch.scheduleId || element.closest('[data-schedule-id]')?.getAttribute("data-schedule-id") === launch.scheduleId);
         const card = Array.from(document.querySelectorAll('[data-schedule-id],input[type="radio"]')).find(element => element.getAttribute("data-schedule-id") === launch.scheduleId || element.value === launch.scheduleId);
         if (!selected) {
-          if (card) { await verifyShift(); clickOnce(card); }
+          if (card && await verifyShift()) clickOnce(card);
           say("Select the exact shift you chose on the dashboard, then continue."); return;
         }
       }
-      const starting = /^(start|apply|confirm shift|select shift)/.test(text(candidate)) || candidate.id === "startApplicationButton";
-      if (starting) await verifyShift();
+      const starting = /^(start|apply|confirm shift|select shift|i agree)/.test(text(candidate)) || candidate.id === "startApplicationButton" || candidate === integrity;
+      if (starting && !await verifyShift()) return;
       if (clickOnce(candidate)) say("Application helper is completing saved details and continuing towards assessment.");
-    } catch (error) { say(error.message || "Application helper paused. Check the Amazon page."); }
+    } catch (error) {
+      const unavailable = /no longer available|expired/.test(error.message || "");
+      if (unavailable) stopped = true;
+      say(error.message || "Application helper paused. Check the Amazon page.", unavailable ? "shift_unavailable" : "needs_input");
+    }
     finally { running = false; }
   }
   async function init() {
     try {
+      if (managed) {
+        launch = managed;
+        if (sessionStorage.getItem("agm-stopped") === `${launch.jobId}:${launch.scheduleId}`) {
+          stopped = true; say("Automation stopped. Start a new application from the tool to resume.", "stopped"); return;
+        }
+        await tick();
+        setInterval(() => { void tick(); }, 700);
+        return;
+      }
       const id = new URLSearchParams(location.hash.split("?")[1] || "").get("agmLaunch");
       if (id && /^[a-f0-9-]{36}$/.test(id)) {
         launch = await storage.get(STORAGE_PREFIX + id);

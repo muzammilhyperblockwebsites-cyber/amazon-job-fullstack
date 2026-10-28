@@ -1,36 +1,48 @@
 ﻿# Amazon UK Job Monitor
 
-Next.js dashboard at https://amazon-job-apply.vercel.app. Active API routes fetch
-UK hourly jobs directly from jobsatamazon.co.uk and store preferences, candidate
-profiles, CVs and application activity in MongoDB. Use Node.js 24 and configure
-.env.local from .env.example. prisma/ and backend-proxy.ts are legacy references.
+A Next.js dashboard with a built-in desktop Amazon browser. No extension,
+Tampermonkey setup or browser pop-up permission is required for Apply.
 
-Run npm ci, npm test, npm run lint, npm run build, then npm start.
+## Start the desktop tool
 
-## Apply to assessment
+On Windows, double-click Start Amazon Tool.cmd in this folder. It starts the
+local dashboard at http://127.0.0.1:3111 and opens it. Node.js 24, this project's
+npm dependencies, and Microsoft Edge or Google Chrome are required.
 
-1. Install one helper: /amazon-uk-auto-agree.user.js in Tampermonkey, or download
-   /amazon-auto-agree-extension.zip. For Chrome/Edge, extract the ZIP, open
-   chrome://extensions or edge://extensions, enable Developer mode and Load
-   unpacked. Reload the dashboard and Amazon tabs after installation or updates.
-2. Sign in directly on Amazon in the same browser. Save candidate details and CV
-   on the dashboard. Confirm eligibility answers only after checking them.
-3. Allow dashboard pop-ups and click Apply. The dashboard verifies the selected
-   shift, transfers candidate fields and CV through the helper's local storage,
-   and opens Amazon. Personal details are not put into the URL.
-4. The helper fills recognized fields, attaches the saved CV, and uses normal
-   Next/Continue controls. It pauses on unknown required questions, login,
-   OTP/CAPTCHA, assessment and final submission. A panel on Amazon explains pauses.
-   Amazon form changes may require manual input.
+Sign into the tool. Click Apply on a live shift. The tool opens a separate Amazon
+browser profile under .amazon-session/desktop and retains its Amazon login.
+Complete Amazon login/OTP once if requested. Saved details on Amazon are reused;
+optional candidate details and a CV can also be saved in the dashboard.
 
-Automatic monitoring checks every 12 seconds. Enable it from a click to open a
-waiting application tab; the first 100% match starts there. It does not overwrite
-an active application when another match arrives. Keep both tabs open. A reload
-requires opening a new waiting tab. Application activity records preparation;
-only Amazon can confirm reservation, assessment progress and submission.
+The built-in runner checks both public schedule availability and the signed-in
+application service's ACTIVE status. It uses Amazon's normal Start, I Agree,
+Next and Continue controls. It fills recognized fields and attaches a saved CV.
+It pauses at assessment, final submission, CAPTCHA/OTP or unanswered questions.
+It never disables Amazon's checks or fabricates a reservation. Application
+Progress only confirms shift acceptance after a successful Amazon response
+contains the exact job, schedule and application ID. Stop automation leaves the
+Amazon tab open and does not withdraw the application.
 
-Helper source is in browser-helper/. Run npm run package:helper after editing it
-to update both downloads. Handoffs expire after 30 minutes. The candidate profile
-API requires a tool session; Amazon passwords are not needed by the helper.
-DOM tests cover fields, CV attachment, shift checks, duplicate clicks and pauses.
-They do not submit a real Amazon application.
+The Vercel-hosted dashboard can monitor jobs, but a serverless cloud function
+cannot open a window on your computer. Use Start Amazon Tool.cmd for the desktop
+browser flow. The hosted dashboard links to the local tool when needed.
+
+## Availability and old jobs
+
+Jobs come directly from jobsatamazon.co.uk. A shift rejected by Amazon's signed-in
+application service is temporarily excluded from the local feed. DELETE /api/jobs
+requires a tool session and recoverably archives unavailable saved activity and
+old non-hourly Job records. Profiles, CVs and browser-confirmed applications are
+preserved. Failed availability checks never justify deleting a saved job.
+
+## Development
+
+Configure .env.local using .env.example, then run npm ci and npm run dev.
+Verification: npm test, npm run lint, npm run build. Tests include a real local
+Chrome/Edge engine with intercepted synthetic Amazon pages: no real application
+is submitted. The flow reaches assessment without an extension or manual I Agree,
+and refuses an inactive shift even if public search shows remaining slots.
+
+The shared browser runner is browser-helper/content.js. Legacy extension and
+userscript downloads remain available for compatibility but are not used by the
+normal Apply flow. npm run package:helper refreshes those legacy artifacts.

@@ -185,6 +185,17 @@ const scheduleCache = new Map<
   string,
   { cards: RawScheduleCard[]; expiresAt: number }
 >();
+const availabilityGlobal = globalThis as typeof globalThis & { rejectedAmazonSchedules?: Map<string, number> };
+const rejectedSchedules = availabilityGlobal.rejectedAmazonSchedules ??= new Map<string, number>();
+export function markScheduleUnavailable(jobId: string, scheduleId: string) {
+  rejectedSchedules.set(`${jobId}:${scheduleId}`, Date.now() + 10 * 60 * 1000);
+  scheduleCache.delete(jobId); cachedJobsExpiresAt = 0;
+}
+function wasRejected(jobId: string, scheduleId: string) {
+  const key = `${jobId}:${scheduleId}`, until = rejectedSchedules.get(key);
+  if (until && until > Date.now()) return true;
+  rejectedSchedules.delete(key); return false;
+}
 
 let memoryPrefs: Prefs = {
   locations: [],
@@ -262,7 +273,7 @@ export async function fetchSchedulesForJob(
   if (!jobId) return [];
   const now = Date.now();
   const hit = scheduleCache.get(jobId);
-  if (!forceRefresh && hit && now < hit.expiresAt) return hit.cards.filter(isAvailableSchedule);
+  if (!forceRefresh && hit && now < hit.expiresAt) return hit.cards.filter(card => isAvailableSchedule(card) && !wasRejected(jobId, card.scheduleId || ""));
 
   try {
     const token = await getHvhToken(false);
@@ -306,7 +317,7 @@ export async function fetchSchedulesForJob(
       throw new Error("Live schedule availability could not be verified. Please retry.");
     }
     const cards = rawCards
-      .filter((s) => (!s.jobId || s.jobId === jobId) && isAvailableSchedule(s))
+      .filter((s) => (!s.jobId || s.jobId === jobId) && isAvailableSchedule(s) && !wasRejected(jobId, s.scheduleId || ""))
       .sort(
         (a, b) =>
           (b.laborDemandAvailableCount ?? 1) -
@@ -420,7 +431,7 @@ export async function fetchAllUKHourlyJobs(): Promise<{
 }> {
   const now = Date.now();
   if (cachedJobs && cachedFetchedAt && now < cachedJobsExpiresAt) {
-    return { jobs: cachedJobs, fetchedAt: cachedFetchedAt };
+    return { jobs: cachedJobs.filter(job => !wasRejected(job.id, job.scheduleId)), fetchedAt: cachedFetchedAt };
   }
 
   let token = await getHvhToken(false);
@@ -1049,6 +1060,37 @@ async function getStoredAppliedJobs(): Promise<HourlyJob[]> {
     }
   }
   return memoryAppliedJobs;
+}
+
+export async function removeUnavailableStoredJobs(): Promise<{ removed: number; kept: number; unverified: number; removedLegacyJobs: number }> {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable. No saved jobs were removed.");
+  const rows = await db.collection("AppliedJob").find({ jobId: { $ne: PROFILE_MARKER_ID } }).toArray();
+  let removed = 0, kept = 0, unverified = 0;
+  for (const row of rows) {
+    const jobId = String(row.jobId || "");
+    let unavailable = !/^(JOB-UK-[A-Za-z0-9_-]+|a0R[A-Za-z0-9]+)$/.test(jobId);
+    if (!unavailable) {
+      try {
+        const schedules = await fetchSchedulesForJob(jobId, true);
+        unavailable = row.scheduleId ? !schedules.some(schedule => schedule.scheduleId === row.scheduleId) : schedules.length === 0;
+      } catch { unverified++; continue; }
+    }
+    // Browser-confirmed applications remain in history; unavailable legacy rows are recoverably archived.
+    if (!unavailable || row.applicationId || row.shiftReserved === true) { kept++; continue; }
+    await db.collection("ArchivedJob").replaceOne({ _id: row._id }, { ...row, archivedAt: new Date(), archiveReason: "unavailable_or_non_hourly_job" }, { upsert: true });
+    const result = await db.collection("AppliedJob").deleteOne({ _id: row._id, appliedAt: row.appliedAt ?? { $exists: false } });
+    removed += result.deletedCount;
+    if (result.deletedCount) memoryAppliedJobs = memoryAppliedJobs.filter(job => job.id !== jobId);
+  }
+  cachedJobsExpiresAt = 0;
+  const legacyJobs = await db.collection("Job").find({ jobId: { $not: /^(JOB-UK-[A-Za-z0-9_-]+|a0R[A-Za-z0-9]+)$/ } }).toArray();
+  let removedLegacyJobs = 0;
+  if (legacyJobs.length) {
+    await db.collection("ArchivedLegacyJob").bulkWrite(legacyJobs.map(row => ({ replaceOne: { filter: { _id: row._id }, replacement: { ...row, archivedAt: new Date(), archiveReason: "legacy_non_hourly_job" }, upsert: true } })));
+    removedLegacyJobs = (await db.collection("Job").deleteMany({ _id: { $in: legacyJobs.map(row => row._id) } })).deletedCount;
+  }
+  return { removed, kept, unverified, removedLegacyJobs };
 }
 
 export async function handleJobsFallback(req: NextRequest): Promise<Response> {

@@ -110,3 +110,49 @@ test('monitoring a 100% match does not fabricate an application or assessment re
     assert.deepEqual(agent.logs, []);
   } finally { global.fetch = original; }
 });
+
+test('a schedule rejected by the signed-in application service is excluded even if public search stays positive', async () => {
+  const original = global.fetch;
+  try {
+    const service = load();
+    global.fetch = api([live, { ...live, scheduleId: 'alternative', laborDemandAvailableCount: 1 }]);
+    assert.equal((await service.fetchAllUKHourlyJobs()).jobs[0].scheduleId, 'live');
+    service.markScheduleUnavailable(jobId, 'live');
+    assert.equal((await service.fetchAllUKHourlyJobs()).jobs[0].scheduleId, 'alternative');
+  } finally { global.fetch = original; globalThis.rejectedAmazonSchedules?.clear(); }
+});
+
+test('old-job cleanup archives before deleting, preserves profiles and confirmed applications, and skips verification errors', async () => {
+  const original = global.fetch;
+  const archived = [], deleted = [], legacyArchive = [];
+  const records = [
+    { _id: 'corporate', jobId: '12345' },
+    { _id: 'expired', jobId: 'JOB-UK-EXPIRED' },
+    { _id: 'live', jobId },
+    { _id: 'confirmed', jobId: 'JOB-UK-CONFIRMED', applicationId: 'APP-CONFIRMED' },
+    { _id: 'unverified', jobId: 'JOB-UK-ERROR' },
+  ];
+  const db = { collection(name) {
+    if (name === 'AppliedJob') return {
+      find(query) { assert.equal(query.jobId.$ne, '__CANDIDATE_PROFILE__'); return { toArray: async () => records }; },
+      async deleteOne(query) { assert.ok(archived.some(row => row._id === query._id)); deleted.push(query._id); return { deletedCount: 1 }; },
+    };
+    if (name === 'ArchivedJob') return { async replaceOne(_filter, row) { archived.push(row); } };
+    if (name === 'Job') return { find() { return { toArray: async () => [{ _id: 'legacy', jobId: '12345' }] }; }, async deleteMany() { assert.equal(legacyArchive.length, 1); return { deletedCount: 1 }; } };
+    if (name === 'ArchivedLegacyJob') return { async bulkWrite(ops) { legacyArchive.push(...ops); } };
+    throw new Error('Unexpected collection: ' + name);
+  } };
+  try {
+    const service = load(db);
+    global.fetch = async (url, init) => {
+      if (String(url).includes('/csrf')) return Response.json({ token: 'test' });
+      const requestedJob = JSON.parse(init.body).variables.searchScheduleRequest.jobId;
+      if (requestedJob === 'JOB-UK-ERROR') throw new Error('API unavailable');
+      return Response.json({ data: { searchScheduleCards: { scheduleCards: requestedJob === jobId ? [live] : [] } } });
+    };
+    const result = await service.removeUnavailableStoredJobs();
+    assert.deepEqual(result, { removed: 2, kept: 2, unverified: 1, removedLegacyJobs: 1 });
+    assert.deepEqual(deleted, ['corporate', 'expired']);
+    assert.equal(archived.length, 2);
+  } finally { global.fetch = original; }
+});
