@@ -7,10 +7,11 @@ const compiled = ts.transpileModule(fs.readFileSync('src/lib/uk-hourly-fallback.
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
 
-function load() {
+function load(database) {
+  delete globalThis._mongoClientPromise;
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', compiled)(name => {
-    if (name === 'mongodb') return { MongoClient: class { async connect() { throw new Error('No database in tests'); } } };
+    if (name === 'mongodb') return { MongoClient: class { async connect() { if (database) return { db: () => database }; throw new Error('No database in tests'); } } };
     return require(name);
   }, mod, mod.exports);
   return mod.exports;
@@ -73,5 +74,39 @@ test('schedule errors do not reuse cached availability or pretend malformed resp
       JSON.stringify({ jobId, scheduleId: 'live' })
     );
     assert.equal(result.status, 503);
+  } finally { global.fetch = original; }
+});
+
+test('CV survives profile updates and a new server instance without pretending assessment progress', async () => {
+  let record;
+  const database = { collection: () => ({
+    async findOne() { return record; },
+    async updateOne(_filter, update) { record = update.$set; },
+    find() { return { sort() { return this; }, limit() { return this; }, async toArray() { return []; } }; },
+  }) };
+  const request = { method: 'PUT' };
+  let service = load(database);
+  const cvBase64 = 'data:application/pdf;base64,JVBERi0=';
+  assert.equal((await service.handleAgentFallback(request, JSON.stringify({ firstName: 'Original', cvFileName: 'CV.pdf', cvBase64 }))).status, 200);
+  service = load(database);
+  await service.handleAgentFallback(request, JSON.stringify({ firstName: 'Updated', cvBase64: '' }));
+  const result = await (await service.handleAgentFallback({ method: 'GET' })).json();
+  assert.equal(result.profile.firstName, 'Updated');
+  assert.equal(result.profile.cvBase64, cvBase64);
+  assert.equal(result.profile.hasCv, true);
+  assert.deepEqual(result.logs, []);
+});
+
+test('monitoring a 100% match does not fabricate an application or assessment result', async () => {
+  const original = global.fetch;
+  try {
+    const service = load();
+    global.fetch = api([live]);
+    await service.handlePreferencesRequest({ method: 'PATCH' }, JSON.stringify({ autoApplyEnabled: true, keywords: ['Warehouse Associate'] }));
+    const result = await (await service.handleMonitorFallback({ nextUrl: new URL('https://example.invalid/api/monitor') })).json();
+    assert.equal(result.bestMatchJob.matchScore, 100);
+    assert.equal(result.autoApplied, 0);
+    const agent = await (await service.handleAgentFallback({ method: 'GET' })).json();
+    assert.deepEqual(agent.logs, []);
   } finally { global.fetch = original; }
 });

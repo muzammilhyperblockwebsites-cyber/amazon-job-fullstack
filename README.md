@@ -1,16 +1,36 @@
-﻿# Amazon Job Monitor frontend
+﻿# Amazon UK Job Monitor
 
-Next.js dashboard hosted on Vercel at https://amazon-job-apply.vercel.app.
+Next.js dashboard at https://amazon-job-apply.vercel.app. Active API routes fetch
+UK hourly jobs directly from jobsatamazon.co.uk and store preferences, candidate
+profiles, CVs and application activity in MongoDB. Use Node.js 24 and configure
+.env.local from .env.example. prisma/ and backend-proxy.ts are legacy references.
 
-All `/api/*` routes use the authenticated server-side gateway to the Heroku backend. The frontend does not connect to MongoDB or launch a browser worker. Runtime settings are in `.env.example`; the backend key belongs in Vercel's Production environment variables, never a `NEXT_PUBLIC_` variable.
+Run npm ci, npm test, npm run lint, npm run build, then npm start.
 
-```text
-npm ci
-npm run build
-npm run lint
-npm start
-```
+## Apply to assessment
 
-Use Node.js 24.x and `frontend` as the Vercel project root. See the workspace's `backend/DEPLOYMENT.md` for Config Vars, database migration, login and verification steps. `frontend/prisma` is retained only as a legacy schema reference; database commands and seeds run from `backend`.
+1. Install one helper: /amazon-uk-auto-agree.user.js in Tampermonkey, or download
+   /amazon-auto-agree-extension.zip. For Chrome/Edge, extract the ZIP, open
+   chrome://extensions or edge://extensions, enable Developer mode and Load
+   unpacked. Reload the dashboard and Amazon tabs after installation or updates.
+2. Sign in directly on Amazon in the same browser. Save candidate details and CV
+   on the dashboard. Confirm eligibility answers only after checking them.
+3. Allow dashboard pop-ups and click Apply. The dashboard verifies the selected
+   shift, transfers candidate fields and CV through the helper's local storage,
+   and opens Amazon. Personal details are not put into the URL.
+4. The helper fills recognized fields, attaches the saved CV, and uses normal
+   Next/Continue controls. It pauses on unknown required questions, login,
+   OTP/CAPTCHA, assessment and final submission. A panel on Amazon explains pauses.
+   Amazon form changes may require manual input.
 
-Local development requires a local backend with matching `BACKEND_API_KEY`. Set frontend `APP_URL=http://localhost:3000`, `BACKEND_URL=http://localhost:4000`, and backend `FRONTEND_URL=http://localhost:3000` before running both development servers. Production `.env` URLs currently point to the hosted domains.
+Automatic monitoring checks every 12 seconds. Enable it from a click to open a
+waiting application tab; the first 100% match starts there. It does not overwrite
+an active application when another match arrives. Keep both tabs open. A reload
+requires opening a new waiting tab. Application activity records preparation;
+only Amazon can confirm reservation, assessment progress and submission.
+
+Helper source is in browser-helper/. Run npm run package:helper after editing it
+to update both downloads. Handoffs expire after 30 minutes. The candidate profile
+API requires a tool session; Amazon passwords are not needed by the helper.
+DOM tests cover fields, CV attachment, shift checks, duplicate clicks and pauses.
+They do not submit a real Amazon application.
