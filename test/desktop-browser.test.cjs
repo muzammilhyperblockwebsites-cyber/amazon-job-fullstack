@@ -18,3 +18,20 @@ test('a serverless hosted dashboard cannot claim to open a desktop browser', () 
   try { process.env.VERCEL = '1'; assert.equal(desktopCapability().available, false); assert.match(desktopCapability().message, /desktop tool/); }
   finally { if (original === undefined) delete process.env.VERCEL; else process.env.VERCEL = original; }
 });
+
+test('hosted capability and progress endpoints load without importing the desktop browser driver', async () => {
+  const original = process.env.VERCEL;
+  const cloudModule = { exports: {} };
+  let driverImports = 0;
+  try {
+    process.env.VERCEL = '1';
+    new Function('require', 'module', 'exports', code)(name => {
+      if (name === 'playwright-core') { driverImports++; throw new Error('Desktop browser driver is unavailable on this cloud host'); }
+      return require(name);
+    }, cloudModule, cloudModule.exports);
+    assert.equal(cloudModule.exports.desktopCapability().available, false);
+    assert.ok(Array.isArray(cloudModule.exports.browserTasks()));
+    await assert.rejects(cloudModule.exports.startBrowserApplication({}), /desktop tool/);
+    assert.equal(driverImports, 0);
+  } finally { if (original === undefined) delete process.env.VERCEL; else process.env.VERCEL = original; }
+});

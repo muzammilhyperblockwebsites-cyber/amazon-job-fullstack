@@ -1,4 +1,4 @@
-import { chromium, type BrowserContext, type Page } from "playwright-core";
+import type { BrowserContext, Page } from "playwright-core";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -31,6 +31,9 @@ async function browser(): Promise<BrowserContext> {
   if (state.context) return state.context;
   if (state.opening) return state.opening;
   state.opening = (async () => {
+    // Loading the desktop driver at route startup can crash serverless deployments.
+    // Hosted capability/status requests must never initialize Playwright.
+    const { chromium } = await import("playwright-core");
     const candidates = process.platform === "win32" ? [
       path.join(process.env["ProgramFiles(x86)"] || "C:/Program Files (x86)", "Microsoft/Edge/Application/msedge.exe"),
       path.join(process.env.ProgramFiles || "C:/Program Files", "Google/Chrome/Application/chrome.exe"),
