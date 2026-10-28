@@ -413,10 +413,10 @@ export async function fetchAllUKHourlyJobs(): Promise<{
       country: "United Kingdom",
       keyWords: "",
       equalFilters: [],
-      containFilters: [{ key: "isPrivateSchedule", val: ["true", "false"] }],
+      containFilters: [{ key: "isPrivateSchedule", val: ["false"] }],
       rangeFilters: [],
       orFilters: [],
-      dateFilters: [],
+      dateFilters: [{ key: "firstDayOnSite", range: { startDate: new Date().toISOString().split("T")[0] } }],
       sorters: [{ fieldName: "totalPayRateMax", ascending: "false" }],
       pageSize: 100,
       consolidateSchedule: true,
@@ -458,13 +458,6 @@ export async function fetchAllUKHourlyJobs(): Promise<{
     for (const card of cards) {
       const id = card.jobId || card.id || "";
       if (!/^(JOB-UK-[A-Za-z0-9_-]+|a0R[A-Za-z0-9]+)$/.test(id)) continue;
-      if (
-        card.scheduleCount !== undefined &&
-        card.scheduleCount !== null &&
-        Number(card.scheduleCount) <= 0
-      ) {
-        continue;
-      }
       rawList.push(card);
     }
     nextToken = result?.nextToken || undefined;
@@ -1043,7 +1036,7 @@ export async function handleJobsFallback(req: NextRequest): Promise<Response> {
     const search = (sp.get("search") || "").trim().toLowerCase();
     const minScore = Number(sp.get("minScore")) || 0;
     const page = Math.max(1, Number(sp.get("page")) || 1);
-    const limit = Math.max(1, Math.min(100, Number(sp.get("limit")) || 20));
+    const limit = Math.max(1, Math.min(100, Number(sp.get("limit")) || 100));
 
     const filtersOn = hasActiveFilters(prefs);
     const scored = rawJobs

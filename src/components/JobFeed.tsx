@@ -96,7 +96,7 @@ const JobFeed = forwardRef<JobFeedHandle>((_, ref) => {
         const ov = filterOverrideRef.current;
         const params = new URLSearchParams({
           page: String(p),
-          limit: "20",
+          limit: "100",
           tab,
 
           ...(minScore > 0 ? { minScore: String(minScore) } : {}),

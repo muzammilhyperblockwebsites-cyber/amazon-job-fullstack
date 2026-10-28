@@ -15,7 +15,7 @@ const ALLOWED_EMAILS = new Set([
 ]);
 const DEFAULT_HASH = process.env.TOOL_LOGIN_PASSWORD_HASH || "";
 const SECRET =
-  process.env.BACKEND_API_KEY || "amazon-job-monitor-uk-session-secret";
+  process.env.SESSION_SECRET || process.env.BACKEND_API_KEY || "amazon-job-monitor-uk-session-secret";
 
 function verifyScrypt(password: string, encoded: string): boolean {
   const [alg, salt, expected] = String(encoded || "").split(":");
