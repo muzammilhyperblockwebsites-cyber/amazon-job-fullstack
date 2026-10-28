@@ -170,6 +170,7 @@ export default function PreferencesPanel({
     shiftPreference: "Any Shift",
     cvFileName: "",
     cvBase64: "",
+    hasCv: false,
     aiFormFillerEnabled: true,
     autoClickNextEnabled: true,
     requireHumanApproval: true,
@@ -252,11 +253,12 @@ export default function PreferencesPanel({
       };
       const response = await fetch('/api/agent', init);
       if (!response.ok) throw new Error('Candidate profile was not saved. Please retry.');
+      const result = await response.json();
       setSaveError(null);
       window.dispatchEvent(
         new CustomEvent("agent-profile-updated")
       );
-      setCandidateProfile((previous) => ({ ...previous, cvBase64: "" }));
+      setCandidateProfile((previous) => ({ ...previous, cvBase64: "", hasCv: Boolean(result.profile?.hasCv) }));
       setProfileSaved(true);
       setTimeout(() => setProfileSaved(false), 3000);
     } catch (error) { setSaveError(error instanceof Error ? error.message : "Profile save failed");
@@ -585,7 +587,7 @@ export default function PreferencesPanel({
           />
           {candidateProfile.cvFileName && (
             <p className="text-[11px] text-green-700 font-medium mt-1">
-              📄 Active CV: {candidateProfile.cvFileName}
+              {candidateProfile.hasCv || candidateProfile.cvBase64 ? "CV ready: " : "Re-upload CV to save its contents: "}{candidateProfile.cvFileName}
             </p>
           )}
         </div>

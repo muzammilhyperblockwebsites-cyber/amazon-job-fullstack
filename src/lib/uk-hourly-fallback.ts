@@ -1236,7 +1236,7 @@ export async function handleAgentFallback(
         ...rest,
         ...(cvBase64 ? { cvBase64 } : {}),
         hasCv: Boolean(
-          cvBase64 || memoryProfile.hasCv || memoryProfile.cvFileName
+          cvBase64 || memoryProfile.cvBase64
         ),
       };
       if (db) {

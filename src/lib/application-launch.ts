@@ -35,6 +35,9 @@ export async function launchApplication(job: LaunchJob, tab: Window | null): Pro
     if (!profile.firstName || !profile.lastName || !profile.phone || !profile.postcode) {
       throw new Error("Save your name, phone and postcode in Candidate Profile first.");
     }
+    if (profile.cvFileName && !profile.cvBase64) {
+      throw new Error("Re-upload and save your CV. The previous helper saved its filename without the file contents.");
+    }
     const result = await readApiResponse(await fetch("/api/jobs/apply", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(job),
     }));
