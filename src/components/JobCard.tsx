@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { matchLabel, matchColour } from "@/lib/matcher";
+import { launchApplication } from "@/lib/application-launch";
 
 interface Job {
   id: string;
@@ -76,40 +77,14 @@ export default function JobCard({ job }: { job: Job }) {
   const [status, setStatus] = useState(job.applicationStatus || "");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const applied = status === "applied" || status === "assessment_ready";
-  const directUrl = getDirectAmazonApplyUrl(
-    job.id,
-    job.applyUrl,
-    job.jobId,
-    job.scheduleId
-  );
-
+  const applied = status === "applied";
   async function openApplication() {
     const tab = window.open("about:blank", "_blank");
     setLoading(true);
     setError("");
     try {
-      const response = await fetch("/api/jobs/apply", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jobId: job.id,
-          scheduleId: job.scheduleId || "",
-          title: job.title,
-          location: job.location,
-          category: job.category || "",
-          jobType: job.jobType || "",
-          applyUrl: directUrl,
-          matchScore: job.matchScore,
-        }),
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "Shift availability could not be verified.");
-      if (tab && !tab.closed && result.applyUrl && result.scheduleId) {
-        tab.location.href = result.applyUrl;
-      }
-      setStatus(result.job?.applicationStatus || "link_opened");
-      window.dispatchEvent(new CustomEvent("stats-refresh"));
+      await launchApplication({ ...job, id: job.jobId || job.id }, tab);
+      setStatus("helper_started");
     } catch (err) {
       tab?.close();
       setError(
@@ -152,7 +127,7 @@ export default function JobCard({ job }: { job: Job }) {
             ? "Saved application activity — check progress on Amazon"
             : applied
             ? "✅ Submission verified"
-            : "Application link ready — complete your application on Amazon"}
+            : "Helper started — view progress in the Amazon tab"}
         </p>
       )}
       {error && (
@@ -167,8 +142,8 @@ export default function JobCard({ job }: { job: Job }) {
         className="rounded-lg bg-orange-500 hover:bg-orange-600 text-white font-semibold text-sm px-4 py-2 disabled:opacity-50 cursor-pointer"
       >
         {loading
-          ? "Checking live shift…"
-          : "Check shift & open application"}
+          ? "Checking shift & preparing helper…"
+          : "Apply automatically to assessment"}
       </button>
     </article>
   );

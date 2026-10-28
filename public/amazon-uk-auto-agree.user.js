@@ -1,606 +1,265 @@
 // ==UserScript==
-// @name         Amazon UK Jobs — Auto Bypass "I Agree" & Auto-Advance to Assessment
+// @name         Amazon UK Application Helper
 // @namespace    https://amazon-job-apply.vercel.app/
-// @version      3.1.0
-// @description  Completely bypasses "I Agree" (Application Integrity Notice), prevents tab reload loops, auto-resolves live shifts, and advances jobsatamazon.co.uk directly to Assessment.
-// @author       Amazon Job Monitor UK
+// @version      4.0.0
+// @description  Fill saved candidate details and continue to assessment using Amazon's normal controls.
 // @match        https://www.jobsatamazon.co.uk/*
 // @match        https://jobsatamazon.co.uk/*
+// @match        https://amazon-job-apply.vercel.app/*
+// @match        http://localhost/*
+// @match        http://127.0.0.1/*
 // @run-at       document-start
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
 // ==/UserScript==
 
+/* global GM_getValue, GM_setValue, GM_deleteValue */
 (function () {
   "use strict";
+  if (globalThis.__amazonMonitorHelperV4) return;
+  globalThis.__amazonMonitorHelperV4 = true;
+  const STORAGE_PREFIX = "agm-launch:";
+  const TTL = 30 * 60 * 1000;
+  const isAmazon = /^(www\.)?jobsatamazon\.co\.uk$/.test(location.hostname);
+  const isDashboard = location.origin === "https://amazon-job-apply.vercel.app" || /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
+  const storage = {
+    async get(key) {
+      if (typeof GM_getValue === "function") return GM_getValue(key, null);
+      return (await chrome.storage.local.get(key))[key] || null;
+    },
+    async set(key, value) {
+      if (typeof GM_setValue === "function") return GM_setValue(key, value);
+      return chrome.storage.local.set({ [key]: value });
+    },
+    async remove(key) {
+      if (typeof GM_deleteValue === "function") return GM_deleteValue(key);
+      return chrome.storage.local.remove(key);
+    },
+  };
 
-  let integrityAgreed = false;
-  let startClicked = false;
-  let existingAppContinued = false;
-  let candidatePreloaded = false;
-  let applicationCreatedOrDispatched = false;
-  let resolvedLiveScheduleId = "";
-  let scheduleResolutionStarted = false;
-
-  function getUrlParam(name) {
-    try {
-      const hashQuery = (window.location.hash || "").split("?")[1] || "";
-      const hashParams = new URLSearchParams(hashQuery);
-      if (hashParams.get(name)) return hashParams.get(name);
-      const searchParams = new URLSearchParams(window.location.search || "");
-      if (searchParams.get(name)) return searchParams.get(name);
-      return sessionStorage.getItem(name) || "";
-    } catch {
-      return "";
-    }
-  }
-
-  function sanitizeUrlParams(stripResumeFlag) {
-    try {
-      let changed = false;
-      const url = new URL(window.location.href);
-      if (url.searchParams.has("page")) {
-        url.searchParams.delete("page");
-        changed = true;
-      }
-      if (
-        stripResumeFlag &&
-        url.searchParams.has("resumeApplicationLogicOnReturnFromAuth")
-      ) {
-        url.searchParams.delete("resumeApplicationLogicOnReturnFromAuth");
-        changed = true;
-      }
-      if (
-        stripResumeFlag &&
-        url.hash.includes("resumeApplicationLogicOnReturnFromAuth")
-      ) {
-        const parts = url.hash.split("?");
-        if (parts[1]) {
-          const hp = new URLSearchParams(parts[1]);
-          hp.delete("resumeApplicationLogicOnReturnFromAuth");
-          const qs = hp.toString();
-          url.hash = qs ? `${parts[0]}?${qs}` : parts[0];
-          changed = true;
-        }
-      }
-      if (changed) {
-        window.history.replaceState(
-          window.history.state,
-          document.title,
-          url.toString()
-        );
-      }
-      if (stripResumeFlag) {
-        sessionStorage.removeItem("resumeApplicationLogicOnReturnFromAuth");
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  sanitizeUrlParams(false);
-
-  function getCandidateId() {
-    try {
-      const fromLs = localStorage.getItem("bbCandidateId");
-      if (fromLs) return fromLs;
-      const store = window.reduxStore;
-      const fromRedux =
-        store?.getState?.()?.candidate?.results?.candidateData?.candidateId ||
-        store?.getState?.()?.application?.results?.candidateId;
-      return fromRedux || "";
-    } catch {
-      return "";
-    }
-  }
-
-  function getBestScheduleId() {
-    try {
-      if (resolvedLiveScheduleId) return resolvedLiveScheduleId;
-      const store = window.reduxStore;
-      const fromRedux =
-        store?.getState?.()?.schedule?.results?.scheduleDetail?.scheduleId;
-      if (fromRedux) return fromRedux;
-      return getUrlParam("scheduleId") || "";
-    } catch {
-      return "";
-    }
-  }
-
-  async function resolveLiveScheduleForJob() {
-    if (scheduleResolutionStarted) return;
-    const jobId = getUrlParam("jobId");
-    if (!jobId || !jobId.startsWith("JOB-")) return;
-    scheduleResolutionStarted = true;
-
-    try {
-      const csrfRes = await fetch(
-        "https://www.jobsatamazon.co.uk/authorize/api/csrf?countryCode=UK",
-        { credentials: "include" }
-      );
-      if (!csrfRes.ok) return;
-      const csrfData = await csrfRes.json();
-      const token = csrfData?.token;
-      if (!token) return;
-
-      const today = new Date().toISOString().split("T")[0];
-      const gqlRes = await fetch("https://www.jobsatamazon.co.uk/graphql", {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer Status|unauthenticated|Session|${token}`,
-          "x-amz-access-token": token,
-        },
-        body: JSON.stringify({
-          operationName: "searchScheduleCards",
-          variables: {
-            searchScheduleRequest: {
-              locale: "en-GB",
-              country: "United Kingdom",
-              keyWords: "",
-              equalFilters: [],
-              containFilters: [{ key: "isPrivateSchedule", val: ["false"] }],
-              rangeFilters: [],
-              orFilters: [],
-              dateFilters: [
-                { key: "firstDayOnSite", range: { startDate: today } },
-              ],
-              sorters: [{ fieldName: "totalPayRateMax", ascending: "false" }],
-              pageSize: 25,
-              jobId,
-              consolidateSchedule: true,
-            },
-          },
-          query: `query searchScheduleCards($searchScheduleRequest: SearchScheduleRequest!) {
-            searchScheduleCards(searchScheduleRequest: $searchScheduleRequest) {
-              scheduleCards {
-                scheduleId
-                jobId
-                laborDemandAvailableCount
-              }
-            }
-          }`,
-        }),
-      });
-      if (!gqlRes.ok) return;
-      const gqlData = await gqlRes.json();
-      const rawCards =
-        gqlData?.data?.searchScheduleCards?.scheduleCards || [];
-      const activeCards = rawCards
-        .filter(
-          (c) =>
-            (c.laborDemandAvailableCount ?? 1) > 0 && Boolean(c.scheduleId)
-        )
-        .sort(
-          (a, b) =>
-            (b.laborDemandAvailableCount ?? 1) -
-            (a.laborDemandAvailableCount ?? 1)
-        );
-
-      if (activeCards.length > 0) {
-        const urlSched = getUrlParam("scheduleId");
-        const isUrlSchedActive = activeCards.some(
-          (c) => c.scheduleId === urlSched
-        );
-        const chosen = isUrlSchedActive
-          ? urlSched
-          : activeCards[0].scheduleId;
-        resolvedLiveScheduleId = chosen;
-        sessionStorage.setItem("scheduleId", chosen);
-
-        if (chosen && chosen !== urlSched) {
-          try {
-            const url = new URL(window.location.href);
-            url.searchParams.set("scheduleId", chosen);
-            if (url.hash.includes("?")) {
-              const [hPath, hQuery] = url.hash.split("?");
-              const hp = new URLSearchParams(hQuery);
-              hp.set("scheduleId", chosen);
-              url.hash = `${hPath}?${hp.toString()}`;
-            }
-            window.history.replaceState(
-              window.history.state,
-              document.title,
-              url.toString()
-            );
-          } catch {
-            // ignore
-          }
-        }
-
-        if (window.reduxStore?.dispatch) {
-          window.reduxStore.dispatch({
-            type: "GET_DETAIL",
-            payload: { locale: "en-GB", scheduleId: chosen },
-            intermediateCall: true,
-          });
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  void resolveLiveScheduleForJob();
-
-  function ensureCompleteIntegrityPayload() {
-    try {
-      const raw = sessionStorage.getItem("integrityNoticePayload");
-      let parsed = {};
-      if (raw) {
-        try {
-          parsed = JSON.parse(raw) || {};
-        } catch {
-          parsed = {};
-        }
-      }
-      const store = window.reduxStore;
-      const jobResults = store?.getState?.()?.job?.results;
-      const jobId =
-        parsed.jobId || jobResults?.jobId || getUrlParam("jobId") || "";
-      const scheduleId = getBestScheduleId() || parsed.scheduleId || "";
-      const candidateId = parsed.candidateId || getCandidateId() || "";
-
-      if (jobId) {
-        const patched = {
-          jobId,
-          scheduleId,
-          candidateId,
-          dspEnabled:
-            typeof parsed.dspEnabled === "boolean"
-              ? parsed.dspEnabled
-              : Boolean(jobResults?.dspEnabled),
-          jobAssessmentToggle:
-            typeof parsed.jobAssessmentToggle === "boolean"
-              ? parsed.jobAssessmentToggle
-              : Boolean(jobResults?.bypassAssessment),
-          jobAssessmentType:
-            parsed.jobAssessmentType ?? jobResults?.assessmentType,
-        };
-        sessionStorage.setItem(
-          "integrityNoticePayload",
-          JSON.stringify(patched)
-        );
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  function hookReduxStore(store) {
-    if (!store || typeof store.getState !== "function") return;
-    try {
-      const disableNoticeFlags = () => {
-        try {
-          const state = store.getState();
-          const fl = state?.appConfig?.results?.envConfig?.featureList;
-          if (fl) {
-            if (fl.ENABLE_APPLICATION_INTEGRITY_NOTICE) {
-              fl.ENABLE_APPLICATION_INTEGRITY_NOTICE = {
-                UK: { isAvailable: false, jobIdAllowList: "" },
-              };
-            }
-            if (fl.ENABLE_EMPTY_SCHEDULE_CHECK) {
-              fl.ENABLE_EMPTY_SCHEDULE_CHECK = {
-                isAvailable: false,
-                UK: { isAvailable: false },
-              };
-            }
-          }
-        } catch {
-          // ignore
-        }
-      };
-
-      disableNoticeFlags();
-
-      if (!store.__agyHooked) {
-        store.__agyHooked = true;
-
-        if (typeof store.subscribe === "function") {
-          store.subscribe(disableNoticeFlags);
-        }
-
-        if (typeof store.dispatch === "function") {
-          const origDispatch = store.dispatch.bind(store);
-          store.dispatch = function (action) {
-            try {
-              disableNoticeFlags();
-              if (action && typeof action === "object") {
-                if (
-                  action.type === "CREATE_APPLICATION_AND_SKIP_SCHEDULE" ||
-                  action.type === "CREATE_APPLICATION"
-                ) {
-                  applicationCreatedOrDispatched = true;
-                  sanitizeUrlParams(true);
-
-                  const cid =
-                    action.payload?.candidateId || getCandidateId();
-                  const sid =
-                    resolvedLiveScheduleId ||
-                    action.payload?.scheduleId ||
-                    getBestScheduleId();
-
-                  if (action.payload && typeof action.payload === "object") {
-                    if (cid) action.payload.candidateId = cid;
-                    if (sid) action.payload.scheduleId = sid;
-                  }
-
-                  if (action.type === "CREATE_APPLICATION" && sid) {
-                    action.type = "CREATE_APPLICATION_AND_SKIP_SCHEDULE";
-                    delete action.onSuccess;
-                  }
-                }
-              }
-            } catch {
-              // ignore
-            }
-            return origDispatch(action);
-          };
-        }
-
-        if (!candidatePreloaded && localStorage.getItem("bbCandidateId")) {
-          candidatePreloaded = true;
-          try {
-            store.dispatch({
-              type: "GET_CANDIDATE",
-              displayAuthErrorMessage: false,
-              hideLoaderOnSuccess: true,
-              unsanitized: false,
-            });
-          } catch {
-            // ignore
-          }
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  try {
-    let _reduxStore = window.reduxStore;
-    if (_reduxStore) hookReduxStore(_reduxStore);
-    Object.defineProperty(window, "reduxStore", {
-      configurable: true,
-      enumerable: true,
-      get() {
-        return _reduxStore;
-      },
-      set(val) {
-        _reduxStore = val;
-        hookReduxStore(val);
-      },
-    });
-  } catch {
-    // ignore
-  }
-
-  try {
-    const origOpen = XMLHttpRequest.prototype.open;
-    const origSend = XMLHttpRequest.prototype.send;
-    XMLHttpRequest.prototype.open = function (method, url) {
-      this.__agyUrl = typeof url === "string" ? url : "";
-      if (
-        this.__agyUrl.includes("/get-schedule-details/") &&
-        resolvedLiveScheduleId
-      ) {
-        const fixedUrl = this.__agyUrl.replace(
-          /\/get-schedule-details\/SCH-[^?&/]+/,
-          `/get-schedule-details/${resolvedLiveScheduleId}`
-        );
-        this.__agyUrl = fixedUrl;
-        return origOpen.call(this, method, fixedUrl);
-      }
-      return origOpen.apply(this, arguments);
-    };
-    XMLHttpRequest.prototype.send = function (body) {
+  if (isDashboard) {
+    window.addEventListener("message", async event => {
+      const data = event.data;
+      if (event.source !== window || event.origin !== location.origin || data?.channel !== "amazon-monitor" || !["ping", "launch"].includes(data.type)) return;
+      let error;
       try {
-        if (
-          this.__agyUrl &&
-          this.__agyUrl.includes("/create-application") &&
-          typeof body === "string" &&
-          body.startsWith("{")
-        ) {
-          applicationCreatedOrDispatched = true;
-          sanitizeUrlParams(true);
-          const data = JSON.parse(body);
-          if (!data.candidateId) {
-            const cid = getCandidateId();
-            if (cid) data.candidateId = cid;
-          }
-          const sid =
-            resolvedLiveScheduleId || data.scheduleId || getBestScheduleId();
-          if (sid) data.scheduleId = sid;
-          body = JSON.stringify(data);
-        } else if (
-          this.__agyUrl &&
-          this.__agyUrl.includes("/update-application") &&
-          typeof body === "string" &&
-          body.startsWith("{")
-        ) {
-          const data = JSON.parse(body);
-          if (
-            data.type === "job-confirm" &&
-            data.payload &&
-            !data.payload.scheduleId
-          ) {
-            const sid = getBestScheduleId();
-            if (sid) data.payload.scheduleId = sid;
-            body = JSON.stringify(data);
-          }
+        if (data.type === "launch") {
+          if (!/^[a-f0-9-]{36}$/.test(data.launchId) || !data.jobId || !data.scheduleId || !data.profile) throw new Error("Invalid application handoff.");
+          // Only candidate fields; Amazon credentials are never passed to the helper.
+          const keys = ["firstName", "lastName", "phone", "addressLine1", "city", "postcode", "rightToWorkUk", "rightToWorkType", "over18", "declarationsConfirmed", "requiresVisaSponsorship", "previouslyWorkedAtAmazon", "cvFileName", "cvBase64", "aiFormFillerEnabled", "autoClickNextEnabled", "requireHumanApproval"];
+          const profile = Object.fromEntries(keys.filter(key => key in data.profile).map(key => [key, data.profile[key]]));
+          const entry = { jobId: data.jobId, scheduleId: data.scheduleId, profile, expiresAt: Date.now() + TTL };
+          await storage.set(STORAGE_PREFIX + data.launchId, entry);
+          setTimeout(() => { void storage.remove(STORAGE_PREFIX + data.launchId); }, TTL);
         }
-      } catch {
-        // ignore
-      }
-      return origSend.call(this, body);
-    };
-  } catch {
-    // ignore
+      } catch { error = "The helper could not receive your profile. Check extension storage and retry."; }
+      window.postMessage({ channel: "amazon-monitor-helper", requestId: data.requestId, error, version: "4.0.0" }, location.origin);
+    });
+    return;
   }
+  if (!isAmazon) return;
 
-  function isVisible(el) {
-    if (!el) return false;
-    const style = window.getComputedStyle(el);
-    if (
-      style.display === "none" ||
-      style.visibility === "hidden" ||
-      style.opacity === "0"
-    ) {
-      return false;
+  let launch = null;
+  let panel;
+  let running = false;
+  let lastClick = 0;
+  let routeKey = "";
+  let routeClicks = 0;
+  const uploaded = new WeakSet();
+  const clicks = new WeakMap();
+  const changed = new WeakSet();
+  let verifiedAt = 0;
+  function say(message) {
+    if (!document.body) return;
+    if (!panel) {
+      panel = document.createElement("aside");
+      panel.id = "amazon-monitor-helper-status";
+      panel.setAttribute("role", "status");
+      panel.style.cssText = "position:fixed;bottom:16px;right:16px;z-index:2147483647;background:#172433;color:white;padding:14px;border-radius:10px;max-width:340px;font:14px/1.5 sans-serif;box-shadow:0 3px 14px #0004";
+      document.body.append(panel);
     }
-    const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
+    if (panel.textContent !== message) panel.textContent = message;
   }
-
-  function isOnAssessment() {
-    const hash = (window.location.hash || "").toLowerCase();
-    if (hash.includes("assessment")) return true;
-    if (document.querySelector("#assessment-video")) return true;
-    const text = (document.body ? document.body.innerText : "").toLowerCase();
-    return (
-      text.includes("evaluate your fit at amazon") ||
-      text.includes("read assessment instructions") ||
-      text.includes("start assessment") ||
-      text.includes("begin assessment")
-    );
+  function visible(element) {
+    if (!element || element.closest("#amazon-monitor-helper-status") || element.hidden || element.closest('[hidden],[aria-hidden="true"]')) return false;
+    const style = getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
   }
-
-  function clickSingleTime(btn) {
-    if (!btn || btn.disabled || !isVisible(btn)) return false;
-    if (btn.dataset.agyAutoClicked === "true") return false;
-    btn.dataset.agyAutoClicked = "true";
-
-    try {
-      btn.scrollIntoView({ block: "center", behavior: "instant" });
-    } catch {}
-
-    try {
-      btn.click();
-    } catch {}
-
-    console.log(
-      "[Amazon UK Auto-Apply] Auto-clicked once:",
-      (
-        btn.innerText ||
-        btn.textContent ||
-        btn.getAttribute("data-test-id") ||
-        ""
-      ).trim()
-    );
+  function text(element) { return (element.innerText || element.textContent || element.value || "").trim().replace(/\s+/g, " ").toLowerCase(); }
+  function label(element) {
+    return [element.name, element.id, element.autocomplete, element.getAttribute("aria-label"), ...(element.labels ? Array.from(element.labels, item => item.textContent) : []), document.getElementById(element.getAttribute("aria-labelledby"))?.textContent].filter(Boolean).join(" ").toLowerCase();
+  }
+  function fill(element, value) {
+    if (value === undefined || value === null || value === "" || element.disabled || element.readOnly || element.value === String(value)) return;
+    // Preserve an existing answer or a correction made in the Amazon form.
+    if (element.value && !changed.has(element)) return;
+    const proto = element.tagName === "SELECT" ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, "value").set.call(element, String(value));
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+    changed.add(element);
+  }
+  function answerFor(question, profile) {
+    if (!profile.declarationsConfirmed) return undefined;
+    if (/18|eighteen/.test(question) && /age|old|over|least|18plus/.test(question)) return profile.over18;
+    if (/sponsor/.test(question)) return profile.requiresVisaSponsorship;
+    if (/previous|before|ever/.test(question) && /amazon/.test(question)) return profile.previouslyWorkedAtAmazon;
+    if (/right.?to.?work|legally (authorized|authorised)|eligible to work/.test(question) && !/status|type|document/.test(question)) return profile.rightToWorkType === "Not specified" ? undefined : profile.rightToWorkUk;
+    return undefined;
+  }
+  function completeFields(profile) {
+    const fields = Array.from(document.querySelectorAll("input,select" )).filter(visible);
+    for (const field of fields) {
+      const key = label(field);
+      if (field.tagName === "SELECT") {
+        const answer = answerFor(key, profile);
+        if (typeof answer === "boolean") {
+          const option = Array.from(field.options).find(option => text(option) === (answer ? "yes" : "no"));
+          if (option) fill(field, option.value);
+        }
+        continue;
+      }
+      if (["password", "hidden", "file", "submit", "button", "checkbox", "radio"].includes(field.type)) continue;
+      let value;
+      if (/given-name|first[\s_-]*name|firstname/.test(key)) value = profile.firstName;
+      else if (/family-name|last[\s_-]*name|surname|lastname/.test(key)) value = profile.lastName;
+      else if (/postal-code|post[\s_-]*code|postcode/.test(key)) value = profile.postcode;
+      else if (/address-line1|address[\s_-]*line[\s_-]*1|street address/.test(key)) value = profile.addressLine1;
+      else if (/address-level2|city|town/.test(key)) value = profile.city;
+      else if (/tel|phone|mobile/.test(key) && !/code|country/.test(key)) value = profile.phone;
+      fill(field, value);
+    }
+    const groups = Array.from(document.querySelectorAll("fieldset,[role='radiogroup']")).filter(visible);
+    for (const group of groups) {
+      const question = group.querySelector("legend")?.textContent || group.getAttribute("aria-label") || document.getElementById(group.getAttribute("aria-labelledby"))?.textContent || "";
+      const answer = answerFor(question.toLowerCase(), profile);
+      if (typeof answer !== "boolean" || group.querySelector("input:checked,[aria-checked='true']")) continue;
+      const option = Array.from(group.querySelectorAll('input[type="radio"],[role="radio"]')).find(option => {
+        const value = (option.labels?.[0]?.textContent || option.getAttribute("aria-label") || option.textContent || option.value || "").trim().toLowerCase();
+        return value === (answer ? "yes" : "no");
+      });
+      if (option && !option.disabled) option.click();
+    }
+    for (const field of fields.filter(field => field.type === "checkbox")) {
+      const answer = answerFor(label(field), profile);
+      if (answer === true && !field.checked && !field.disabled && !changed.has(field)) {
+        field.click(); changed.add(field);
+      }
+    }
+    // Only the declared CV is attached, and only to an identifiable CV field.
+    for (const input of fields.filter(field => field.type === "file")) {
+      if (!/cv|resume|résumé/.test(label(input)) || uploaded.has(input) || !profile.cvBase64 || input.files?.length) continue;
+      const match = /^data:([^;,]+);base64,([A-Za-z0-9+/=\r\n]+)$/.exec(profile.cvBase64);
+      if (!match) continue;
+      const bytes = Uint8Array.from(atob(match[2]), char => char.charCodeAt(0));
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([bytes], profile.cvFileName || "CV.pdf", { type: match[1] }));
+      input.files = transfer.files;
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      uploaded.add(input);
+      lastClick = Date.now(); // Allow Amazon's upload to finish before continuing.
+    }
+  }
+  async function verifyShift() {
+    if (Date.now() - verifiedAt < 8000) return true;
+    const csrf = await fetch("/authorize/api/csrf?countryCode=UK", { credentials: "include", cache: "no-store" });
+    if (!csrf.ok) throw new Error("Shift check unavailable. Retry shortly.");
+    const { token } = await csrf.json();
+    if (!token) throw new Error("Sign in on Amazon to continue.");
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+    const response = await fetch("/graphql", {
+      method: "POST", credentials: "include", cache: "no-store",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer Status|unauthenticated|Session|${token}`, "x-amz-access-token": token },
+      body: JSON.stringify({ operationName: "searchScheduleCards", variables: { searchScheduleRequest: { locale: "en-GB", country: "United Kingdom", keyWords: "", equalFilters: [], containFilters: [{ key: "isPrivateSchedule", val: ["false"] }], rangeFilters: [], orFilters: [], dateFilters: [{ key: "firstDayOnSite", range: { startDate: today } }], sorters: [{ fieldName: "totalPayRateMax", ascending: "false" }], pageSize: 100, jobId: launch.jobId, consolidateSchedule: true } }, query: "query searchScheduleCards($searchScheduleRequest: SearchScheduleRequest!) { searchScheduleCards(searchScheduleRequest: $searchScheduleRequest) { scheduleCards { scheduleId jobId hireStartDate laborDemandAvailableCount } } }" }),
+    });
+    const result = await response.json();
+    if (!response.ok || result.errors?.length || !Array.isArray(result.data?.searchScheduleCards?.scheduleCards)) throw new Error("Live shift could not be verified. Retry shortly.");
+    const found = result.data.searchScheduleCards.scheduleCards.some(card => card.scheduleId === launch.scheduleId && (!card.jobId || card.jobId === launch.jobId) && card.laborDemandAvailableCount > 0 && (!card.hireStartDate || card.hireStartDate.slice(0, 10) >= today));
+    if (!found) throw new Error("Selected shift is no longer available. Return to the dashboard and choose another shift.");
+    verifiedAt = Date.now();
     return true;
   }
-
-  function runAutoAdvance() {
-    try {
-      sanitizeUrlParams(false);
-      void resolveLiveScheduleForJob();
-
-      if (window.reduxStore) {
-        hookReduxStore(window.reduxStore);
-      }
-
-      if (isOnAssessment()) return;
-
-      const href = window.location.href || "";
-      const hash = (window.location.hash || "").toLowerCase();
-
-      if (!existingAppContinued) {
-        const dialog = document.querySelector(
-          '[aria-labelledby="existing-application-title"], [role="dialog"]'
-        );
-        if (dialog && isVisible(dialog)) {
-          const buttons = Array.from(dialog.querySelectorAll("button"));
-          const continueBtn = buttons.find((b) => {
-            const t = (b.innerText || b.textContent || "").trim().toLowerCase();
-            return (
-              t === "continue" ||
-              t.includes("continue") ||
-              t.includes("proceed")
-            );
-          });
-          if (continueBtn && !continueBtn.disabled && isVisible(continueBtn)) {
-            existingAppContinued = true;
-            clickSingleTime(continueBtn);
-            return;
-          }
-        }
-      }
-
-      if (hash.includes("application-integrity-notice") || !integrityAgreed) {
-        const integrityAgreeBtn = document.querySelector(
-          'button[data-test-id="integrity-notice-agree-button"], [data-test-id="integrity-notice-agree-button"]'
-        );
-        if (
-          integrityAgreeBtn &&
-          !integrityAgreeBtn.disabled &&
-          isVisible(integrityAgreeBtn) &&
-          !integrityAgreed
-        ) {
-          sanitizeUrlParams(true);
-          ensureCompleteIntegrityPayload();
-          integrityAgreed = true;
-          clickSingleTime(integrityAgreeBtn);
-          return;
-        }
-      }
-
-      if (hash.includes("job-opportunities")) {
-        const shiftCard = document.querySelector(
-          '[data-test-component="StencilReactCard"][role="button"], .schedule-card, [data-test-id*="schedule"]'
-        );
-        if (
-          shiftCard &&
-          isVisible(shiftCard) &&
-          !shiftCard.dataset.agyAutoClicked
-        ) {
-          clickSingleTime(shiftCard);
-        }
-        const applyBtns = Array.from(document.querySelectorAll("button"));
-        const continueShiftBtn = applyBtns.find((b) => {
-          const t = (b.innerText || b.textContent || "").trim().toLowerCase();
-          return (
-            t === "continue" ||
-            t === "apply" ||
-            t === "next" ||
-            t === "confirm"
-          );
-        });
-        if (
-          continueShiftBtn &&
-          !continueShiftBtn.disabled &&
-          isVisible(continueShiftBtn)
-        ) {
-          clickSingleTime(continueShiftBtn);
-          return;
-        }
-      }
-
-      if (
-        integrityAgreed ||
-        applicationCreatedOrDispatched ||
-        href.includes("applicationId=")
-      ) {
-        return;
-      }
-
-      if (
-        hash.includes("/consent") &&
-        !startClicked &&
-        sessionStorage.getItem("resumeApplicationLogicOnReturnFromAuth") !==
-          "true"
-      ) {
-        const startBtn = document.querySelector("#startApplicationButton");
-        if (startBtn && !startBtn.disabled && isVisible(startBtn)) {
-          startClicked = true;
-          clickSingleTime(startBtn);
-          return;
-        }
-      }
-    } catch {
-      // ignore
-    }
+  function clickOnce(element) {
+    if (!visible(element) || element.disabled || element.getAttribute("aria-disabled") === "true") return false;
+    const key = location.hash + "|" + text(element);
+    if (clicks.get(element) === key || routeClicks >= 8 || Date.now() - lastClick < 1800) return false;
+    const form = element.closest("form");
+    if (form && !form.checkValidity()) { say("Complete the highlighted required fields on Amazon; the helper will resume."); return false; }
+    clicks.set(element, key);
+    routeClicks++;
+    lastClick = Date.now();
+    element.click();
+    return true;
   }
-
-  setInterval(runAutoAdvance, 150);
+  async function tick() {
+    if (running || !launch || !document.body) return;
+    running = true;
+    try {
+      if (Date.now() >= launch.expiresAt) { sessionStorage.removeItem("agm-active"); say("Application helper session expired. Start again from the dashboard."); launch = null; return; }
+      const url = new URL(location.href);
+      const currentJob = new URLSearchParams(url.hash.split("?")[1] || "").get("jobId") || url.searchParams.get("jobId");
+      if (currentJob && currentJob !== launch.jobId) { say("This is a different job. Start it from the dashboard."); return; }
+      const currentSchedule = new URLSearchParams(url.hash.split("?")[1] || "").get("scheduleId") || url.searchParams.get("scheduleId");
+      if (currentSchedule && currentSchedule !== launch.scheduleId) { say("This is a different shift. Start it from the dashboard."); return; }
+      const route = (location.pathname + location.hash.split("?")[0]).toLowerCase();
+      if (route !== routeKey) { routeKey = route; routeClicks = 0; }
+      const body = document.body.cloneNode(true);
+      body.querySelector("#amazon-monitor-helper-status")?.remove();
+      const bodyText = (body.innerText || body.textContent || "").toLowerCase();
+      if (/assessment/.test(route) || document.querySelector("#assessment-video") || /start assessment|begin assessment|read assessment instructions|evaluate your fit at amazon/.test(bodyText)) {
+        say("Assessment reached. Complete the assessment yourself; automatic actions have stopped."); return;
+      }
+      if (Array.from(document.querySelectorAll('input[type="password"],input[autocomplete="one-time-code"],iframe[src*="captcha"],iframe[title*="CAPTCHA"]')).some(visible) || /captcha|login|signin|sign-in/.test(route)) {
+        say("Complete Amazon sign-in, verification or CAPTCHA. The helper will resume afterwards."); return;
+      }
+      if (/shift.*(no longer available|expired)|no shifts available/.test(bodyText)) { say("Shift unavailable. Return to the dashboard for live shifts."); return; }
+      const profile = launch.profile;
+      if (profile.aiFormFillerEnabled === false) { say("Form filling is disabled in your saved profile."); return; }
+      completeFields(profile);
+      if (profile.autoClickNextEnabled === false) { say("Saved details filled. Automatic Next is disabled."); return; }
+      const errors = Array.from(document.querySelectorAll('[role="alert"],[aria-invalid="true"]')).filter(visible);
+      if (errors.length) { say("Resolve the validation message on Amazon. The helper will resume afterwards."); return; }
+      const buttons = Array.from(document.querySelectorAll('button,input[type="submit"],[role="button"]')).filter(visible);
+      const final = buttons.find(button => /^(submit( application)?|finish( application)?|accept( job)? offer|withdraw( application)?)$/.test(text(button)));
+      if (final) { say("Final application step reached. Review your details and submit yourself."); return; }
+      // Use Amazon's controls, never mutate its feature flags, requests or assessment state.
+      const candidate = buttons.find(button => /^(start( application| my application)?|apply( now)?|continue( application| applying)?|next|save (and|&) continue|i agree|agree and continue|confirm shift|select shift)$/.test(text(button)) || button.id === "startApplicationButton");
+      if (!candidate) { say("Waiting for Amazon. Complete any unanswered question or choose your saved shift to continue."); return; }
+      if (/job-opportunities|schedule|shift-selection/.test(route)) {
+        const selected = Array.from(document.querySelectorAll('[aria-checked="true"],[aria-selected="true"],input:checked')).find(element => element.getAttribute("data-schedule-id") === launch.scheduleId || element.value === launch.scheduleId || element.closest('[data-schedule-id]')?.getAttribute("data-schedule-id") === launch.scheduleId);
+        const card = Array.from(document.querySelectorAll('[data-schedule-id],input[type="radio"]')).find(element => element.getAttribute("data-schedule-id") === launch.scheduleId || element.value === launch.scheduleId);
+        if (!selected) {
+          if (card) { await verifyShift(); clickOnce(card); }
+          say("Select the exact shift you chose on the dashboard, then continue."); return;
+        }
+      }
+      const starting = /^(start|apply|confirm shift|select shift)/.test(text(candidate)) || candidate.id === "startApplicationButton";
+      if (starting) await verifyShift();
+      if (clickOnce(candidate)) say("Application helper is completing saved details and continuing towards assessment.");
+    } catch (error) { say(error.message || "Application helper paused. Check the Amazon page."); }
+    finally { running = false; }
+  }
+  async function init() {
+    try {
+      const id = new URLSearchParams(location.hash.split("?")[1] || "").get("agmLaunch");
+      if (id && /^[a-f0-9-]{36}$/.test(id)) {
+        launch = await storage.get(STORAGE_PREFIX + id);
+        if (launch) {
+          sessionStorage.setItem("agm-active", JSON.stringify(launch));
+          await storage.remove(STORAGE_PREFIX + id);
+          const url = new URL(location.href);
+          const [path, query] = url.hash.split("?");
+          const params = new URLSearchParams(query); params.delete("agmLaunch");
+          url.hash = `${path}?${params}`;
+          history.replaceState(history.state, "", url);
+        }
+      }
+      if (!launch) launch = JSON.parse(sessionStorage.getItem("agm-active") || "null");
+      if (!launch) return;
+      await tick();
+      setInterval(() => { void tick(); }, 700);
+    } catch { say("Profile handoff failed. Return to the dashboard and start again."); }
+  }
+  void init();
 })();

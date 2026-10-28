@@ -10,6 +10,7 @@ import {
 import { readApiResponse } from "@/lib/api-response";
 import { useSSE, type SSEJobEvent } from "@/hooks/useSSE";
 import { useNotifications } from "@/hooks/useNotifications";
+import { launchApplication } from "@/lib/application-launch";
 
 export interface MonitorControlHandle {
   pollAndAutoOpenBestMatch: (
@@ -75,29 +76,23 @@ const MonitorControl = forwardRef<
   { onNewJobs?: () => void }
 >(function MonitorControl({ onNewJobs }, ref) {
   const [busy, setBusy] = useState(false);
-  const [connecting, setConnecting] = useState(false);
   const [message, setMessage] = useState("");
-  const [connected, setConnected] = useState(false);
   const [autoEnabled, setAutoEnabled] = useState(false);
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [otp, setOtp] = useState("");
   const [logs, setLogs] = useState<ApplicationLog[]>([]);
   const [jobs, setJobs] = useState<SSEJobEvent[]>([]);
   const notifiedIds = useRef(new Set<string>());
   const autoOpenedIds = useRef(new Set<string>());
+  const polling = useRef(false);
+  const autoApplyTab = useRef<Window | null>(null);
   const { notify, requestPermission } = useNotifications();
 
   const refresh = useCallback(async () => {
-    const [session, agent, prefs] = await Promise.all([
-      jsonRequest("/api/auto-apply"),
+    const [agent, prefs] = await Promise.all([
       jsonRequest("/api/agent"),
       jsonRequest("/api/preferences"),
     ]);
-    setConnected(Boolean(session.connected));
     setLogs(agent.logs || []);
     setAutoEnabled(Boolean(prefs.autoApplyEnabled));
-    if (prefs.amazonEmail) setEmail(prefs.amazonEmail);
   }, []);
 
   useEffect(() => {
@@ -109,6 +104,7 @@ const MonitorControl = forwardRef<
   }, [refresh]);
 
   useSSE((event) => {
+    if (event.type === "heartbeat") { onNewJobs?.(); return; }
     if (event.type !== "new_jobs") return;
     setJobs(event.jobs);
     onNewJobs?.();
@@ -124,6 +120,8 @@ const MonitorControl = forwardRef<
 
   const poll = useCallback(
     async (preOpenedTab?: Window | null, isBackground = false) => {
+      if (polling.current) { preOpenedTab?.close(); return; }
+      polling.current = true;
       if (!isBackground) {
         setBusy(true);
         setMessage("");
@@ -139,11 +137,10 @@ const MonitorControl = forwardRef<
         if (
           preOpenedTab &&
           !preOpenedTab.closed &&
-          best?.applyUrl &&
-          officialUrl(best.applyUrl)
+          best?.id
         ) {
-          autoOpenedIds.current.add(best.id);
-          preOpenedTab.location.href = best.applyUrl;
+          setMessage(await launchApplication(best, preOpenedTab));
+          autoOpenedIds.current.add(`${best.id}:${best.scheduleId}`);
         } else {
           preOpenedTab?.close();
           if (
@@ -152,28 +149,27 @@ const MonitorControl = forwardRef<
             (best.matchScore ?? 0) >= 100 &&
             best.applyUrl &&
             officialUrl(best.applyUrl) &&
-            !autoOpenedIds.current.has(best.id)
+            !autoOpenedIds.current.has(`${best.id}:${best.scheduleId}`)
           ) {
-            autoOpenedIds.current.add(best.id);
-            window.open(best.applyUrl, "_blank", "noopener,noreferrer");
+            const target = autoApplyTab.current;
+            if (!target || target.closed) throw new Error("Enable automatic preparation again to open an application tab. Allow pop-ups for this dashboard.");
+            if (autoOpenedIds.current.size > 0) {
+              setMessage("Another matching shift was found. Finish the current application, then click Check & Apply for the next one.");
+            } else {
+              setMessage(await launchApplication(best, target));
+              autoOpenedIds.current.add(`${best.id}:${best.scheduleId}`);
+            }
           }
         }
-        if (!isBackground) {
-          setMessage(
-            `Checked jobs. ${
-              result.newJobsCount || 0
-            } matching job(s). Auto-advancing 100% matches to Assessment.`
-          );
-        }
+        if (!best) setMessage("No matching live shifts are available. Monitoring will keep checking.");
         onNewJobs?.();
         window.dispatchEvent(new CustomEvent("stats-refresh"));
         await refresh();
       } catch (error) {
         preOpenedTab?.close();
-        if (!isBackground) {
-          setMessage(error instanceof Error ? error.message : "Poll failed");
-        }
+        setMessage(error instanceof Error ? error.message : "Poll failed");
       } finally {
+        polling.current = false;
         if (!isBackground) setBusy(false);
       }
     },
@@ -191,54 +187,30 @@ const MonitorControl = forwardRef<
 
   useImperativeHandle(ref, () => ({ pollAndAutoOpenBestMatch: poll }), [poll]);
 
-  async function connect(event: React.FormEvent) {
-    event.preventDefault();
-    setConnecting(true);
-    setMessage("");
-    try {
-      const data = await jsonRequest("/api/auto-apply", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "connect_session",
-          email,
-          password,
-          otp,
-        }),
-      });
-      setConnected(Boolean(data.connected));
-      setMessage(
-        data.message ||
-          (data.connected
-            ? "Amazon session verified."
-            : "Complete Amazon sign-in and verification.")
-      );
-      if (data.connected) {
-        setPassword("");
-        setOtp("");
-      }
-    } catch (error) {
-      setConnected(false);
-      setMessage(error instanceof Error ? error.message : "Connection failed");
-    } finally {
-      setConnecting(false);
-    }
-  }
-
   async function toggleAutoApply() {
+    const opened = !autoEnabled ? window.open("about:blank", "_blank") : null;
     try {
+      if (!autoEnabled && !opened) throw new Error("Allow pop-ups, then enable automatic preparation again.");
       const data = await jsonRequest("/api/preferences", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ autoApplyEnabled: !autoEnabled }),
       });
       setAutoEnabled(Boolean(data.autoApplyEnabled));
+      if (data.autoApplyEnabled) {
+        autoApplyTab.current = opened;
+        autoOpenedIds.current.clear();
+      } else {
+        // Do not close or overwrite a running Amazon application.
+        autoApplyTab.current = null;
+      }
       setMessage(
         data.autoApplyEnabled
-          ? "Auto-Apply enabled! 100% matching jobs will automatically lock shifts and advance to Assessment."
+          ? "Automatic preparation enabled. Keep the application tab open; the first 100% match starts with your saved profile."
           : "Automatic preparation disabled."
       );
     } catch (error) {
+      opened?.close();
       setMessage(
         error instanceof Error ? error.message : "Preferences were not saved"
       );
@@ -253,8 +225,7 @@ const MonitorControl = forwardRef<
             Job Monitor &amp; Auto-Advance to Assessment
           </h2>
           <p className="text-xs text-gray-500">
-            Full-Stack Next.js Engine • Direct jobsatamazon.co.uk Shift Lock +
-            Assessment Flow
+            Saved details and CV → Amazon forms → pause at assessment
           </p>
         </div>
         <button
@@ -266,7 +237,7 @@ const MonitorControl = forwardRef<
           disabled={busy}
           className="bg-orange-500 hover:bg-orange-600 text-white font-semibold rounded-lg px-4 py-2 disabled:opacity-50 cursor-pointer"
         >
-          {busy ? "Checking & Advancing…" : "⚡ Check & Auto-Apply Now"}
+          {busy ? "Checking & preparing…" : "Check & Apply to Assessment"}
         </button>
       </div>
 
@@ -284,7 +255,7 @@ const MonitorControl = forwardRef<
             }`}
           />
           {autoEnabled
-            ? "Auto-Apply Active (Every 12s → Assessment)"
+            ? "Monitoring active (every 12s)"
             : "Auto-Apply Paused"}
         </span>
 
@@ -293,8 +264,7 @@ const MonitorControl = forwardRef<
           onClick={() => void toggleAutoApply()}
           className="text-sm underline text-blue-700 cursor-pointer"
         >
-          {autoEnabled ? "Disable" : "Enable"} automatic application to
-          Assessment
+          {autoEnabled ? "Disable" : "Enable"} automatic preparation
         </button>
 
         <button
@@ -308,10 +278,11 @@ const MonitorControl = forwardRef<
 
       <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900 flex flex-wrap items-center justify-between gap-2">
         <div>
-          <strong>⚡ Zero-Click &quot;I Agree&quot; → Assessment Helper:</strong>{" "}
-          Automatically bypasses Application Integrity Notice (&quot;I
-          Agree&quot;), locks the shift, and advances to{" "}
-          <code>#/assessment-consent</code>.
+          <strong>Application helper v4 required:</strong>{" "}
+          Install one helper below, reload the dashboard, and save your candidate
+          profile. It fills known fields and continues using Amazon&apos;s controls.
+          Keep the Amazon tab open. Unknown questions, login, OTP, CAPTCHA,
+          assessment and final submission need your input.
         </div>
         <div className="flex items-center gap-2">
           <a
@@ -332,49 +303,9 @@ const MonitorControl = forwardRef<
         </div>
       </div>
 
-      <details>
-        <summary className="cursor-pointer text-sm font-medium">
-          Connect Amazon account ({connected ? "verified" : "not verified"})
-        </summary>
-        <form onSubmit={connect} className="mt-3 grid gap-2">
-          <label className="text-sm">
-            Amazon email
-            <input
-              type="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="block border rounded-lg px-3 py-2 w-full"
-            />
-          </label>
-          <label className="text-sm">
-            Amazon password
-            <input
-              type="password"
-              autoComplete="off"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="block border rounded-lg px-3 py-2 w-full"
-            />
-          </label>
-          <label className="text-sm">
-            Verification code, if requested
-            <input
-              inputMode="numeric"
-              autoComplete="one-time-code"
-              value={otp}
-              onChange={(e) => setOtp(e.target.value)}
-              className="block border rounded-lg px-3 py-2 w-full"
-            />
-          </label>
-          <button
-            disabled={connecting}
-            className="bg-gray-900 text-white rounded-lg px-3 py-2 disabled:opacity-50 cursor-pointer"
-          >
-            {connecting ? "Connecting…" : "Connect / verify"}
-          </button>
-        </form>
-      </details>
+      <a href="https://www.jobsatamazon.co.uk/app#/login" target="_blank" rel="noopener noreferrer" className="inline-block text-sm text-blue-700 underline">
+        Sign in directly on Amazon before applying
+      </a>
 
       {message && (
         <p role="status" className="text-sm text-gray-700">
@@ -389,7 +320,7 @@ const MonitorControl = forwardRef<
       {logs.length > 0 && (
         <details open>
           <summary className="cursor-pointer font-medium text-sm">
-            Application activity ({logs.length} advanced to Assessment)
+            Application activity ({logs.length} prepared)
           </summary>
           <ul className="mt-3 space-y-3">
             {logs.map((log) => (
@@ -407,7 +338,7 @@ const MonitorControl = forwardRef<
                 {log.steps?.length ? (
                   <ul className="text-xs text-gray-600 mt-2 space-y-1">
                     {log.steps.map((step, index) => (
-                      <li key={index}>✅ {step}</li>
+                      <li key={index}>{step}</li>
                     ))}
                   </ul>
                 ) : null}
@@ -418,7 +349,7 @@ const MonitorControl = forwardRef<
                     rel="noopener noreferrer"
                     className="inline-block mt-2 text-blue-700 underline font-medium"
                   >
-                    Open at Assessment on Amazon ↗
+                    Review on Amazon ↗
                   </a>
                 )}
               </li>

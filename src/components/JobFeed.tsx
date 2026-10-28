@@ -459,8 +459,8 @@ const JobFeed = forwardRef<JobFeedHandle>((_, ref) => {
           <div className="flex items-center justify-between flex-wrap gap-2 mb-4 bg-green-50 border border-green-200 rounded-xl p-4">
             <div>
               <h3 className="text-sm font-bold text-green-900 flex items-center gap-2">
-                <span>🚀</span> Saved &amp; Auto-Application history Vault (
-                {storedAppliedJobs.length} Saved in Database)
+                <span>🚀</span> Saved Application Activity (
+                {storedAppliedJobs.length} prepared)
               </h3>
               <p className="text-xs text-green-700 mt-0.5">
                 Saved application activity. Availability is checked again before

@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Amazon UK Application Helper",
+  "version": "4.0.0",
+  "description": "Fill saved candidate details and continue to assessment using Amazon's normal controls.",
+  "permissions": ["storage"],
+  "content_scripts": [{
+    "matches": ["https://www.jobsatamazon.co.uk/*", "https://jobsatamazon.co.uk/*", "https://amazon-job-apply.vercel.app/*", "http://localhost/*", "http://127.0.0.1/*"],
+    "js": ["content.js"],
+    "run_at": "document_start"
+  }]
+}

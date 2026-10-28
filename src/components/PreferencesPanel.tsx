@@ -604,24 +604,24 @@ export default function PreferencesPanel({
               className="w-4 h-4 accent-orange-500"
             />
             <span className="text-xs text-gray-800 font-medium">
-              AI Form Filler &amp; Auto-Click (Next / Continue)
+              Fill saved details automatically
             </span>
+          </label>
+
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" checked={candidateProfile.autoClickNextEnabled} onChange={e => setCandidateProfile(p => ({ ...p, autoClickNextEnabled: e.target.checked }))} className="w-4 h-4 accent-orange-500" />
+            <span className="text-xs text-gray-800 font-medium">Continue automatically to assessment</span>
           </label>
 
           <label className="flex items-center gap-2 cursor-pointer">
             <input
               type="checkbox"
-              checked={candidateProfile.requireHumanApproval}
-              onChange={(e) =>
-                setCandidateProfile((p) => ({
-                  ...p,
-                  requireHumanApproval: e.target.checked,
-                }))
-              }
+              checked={true}
+              disabled
               className="w-4 h-4 accent-orange-500"
             />
             <span className="text-xs text-gray-800 font-medium">
-              Human Approval before Final Submit (Pause at final step)
+              Pause before final submission (assessment always pauses)
             </span>
           </label>
         </div>

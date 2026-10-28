@@ -213,14 +213,16 @@ let memoryProfile: Record<string, unknown> = {
   postcode: "",
   addressLine1: "",
   city: "",
-  rightToWorkStatus: "",
-  Confirm18Plus: false,
-  PreviouslyWorkedAtAmazon: false,
-  RequireSponsorship: false,
-  confirmedEligibility: false,
+  rightToWorkType: "Not specified",
+  rightToWorkUk: false,
+  over18: false,
+  previouslyWorkedAtAmazon: false,
+  requiresVisaSponsorship: false,
+  declarationsConfirmed: false,
   cvFileName: "",
-  autoFillEnabled: true,
-  humanApprovalRequired: true,
+  aiFormFillerEnabled: true,
+  autoClickNextEnabled: true,
+  requireHumanApproval: true,
 };
 
 let memoryAppliedJobs: HourlyJob[] = [];
@@ -1038,7 +1040,7 @@ async function getStoredAppliedJobs(): Promise<HourlyJob[]> {
           : new Date().toISOString(),
         isNew: false,
         matchScore: Number(r.matchScore) || 100,
-        autoApplied: true,
+        autoApplied: r.status === "applied",
         appliedAt: r.appliedAt
           ? new Date(r.appliedAt as string | Date).toISOString()
           : new Date().toISOString(),
@@ -1077,7 +1079,7 @@ export async function handleJobsFallback(req: NextRequest): Promise<Response> {
           isNew: !memorySeenIds.has(j.id),
           passes,
           matchScore,
-          autoApplied: Boolean(appRec),
+          autoApplied: appRec?.applicationStatus === "applied",
           appliedAt: appRec?.appliedAt || null,
           applicationStatus: appRec?.applicationStatus || null,
         };
@@ -1190,7 +1192,7 @@ export async function handleStatsFallback(req: NextRequest): Promise<Response> {
         avgMatchScore,
         lastChecked: fetchedAt,
         isMonitoring: true,
-        autoAppliedTotal: storedApplied.length,
+        autoAppliedTotal: storedApplied.filter(job => job.applicationStatus === "applied").length,
         jobFeed: {
           provider: "jobsatamazon.co.uk",
           stale: false,
@@ -1223,9 +1225,16 @@ export async function handleAgentFallback(
     try {
       const body = JSON.parse(rawBody || "{}") as Record<string, unknown>;
       const { cvBase64, ...rest } = body;
+      if (cvBase64 && (typeof cvBase64 !== "string" || cvBase64.length > 4_200_000 || !/^data:(application\/pdf|application\/msword|application\/vnd\.openxmlformats-officedocument\.wordprocessingml\.document);base64,[A-Za-z0-9+/=\r\n]+$/.test(cvBase64))) {
+        return Response.json({ error: "Upload a valid PDF or Word CV, no larger than 3 MB." }, { status: 400 });
+      }
+      // Load the existing profile before merging, including the saved CV on cold starts.
+      const existing = db ? await db.collection("AppliedJob").findOne({ jobId: PROFILE_MARKER_ID }) : null;
+      if (existing?.profileData) memoryProfile = { ...memoryProfile, ...existing.profileData };
       memoryProfile = {
         ...memoryProfile,
         ...rest,
+        ...(cvBase64 ? { cvBase64 } : {}),
         hasCv: Boolean(
           cvBase64 || memoryProfile.hasCv || memoryProfile.cvFileName
         ),
@@ -1274,15 +1283,12 @@ export async function handleAgentFallback(
       logs: storedApplied.map((j) => ({
         jobId: j.id,
         title: j.title,
-        status: j.applicationStatus || "assessment_ready",
+        status: j.applicationStatus === "applied" ? "applied" : "application_prepared",
         applyUrl: j.applyUrl,
-        shiftReserved: true,
+        shiftReserved: false,
         steps: [
-          `Step 1: Live Shift Reserved (${j.scheduleId || "Auto-Selected"})`,
-          "Step 2: Consent & Integrity Notice ('I Agree') Bypassed",
-          "Step 3: UK Right-to-Work & Eligibility Applied",
-          "Step 4: Candidate Profile & CV Attached",
-          "Step 5: Paused at Assessment (#/assessment-consent)",
+          `Application link prepared (${j.scheduleId || "No selected shift"})`,
+          "View actual form and assessment progress in the Amazon tab.",
         ],
       })),
     },
@@ -1314,11 +1320,11 @@ export async function handleAutoApplyFallback(
         }
         return Response.json(
           {
-            connected: true,
-            status: "connected",
+            connected: false,
+            status: "sign_in_on_amazon",
             email: body.email || prefs.amazonEmail || null,
             message:
-              "Amazon UK account saved! Keep jobsatamazon.co.uk signed in on your browser for instant 1-click shift locking.",
+              "Sign in directly on Amazon in the browser used for applications. Saving an email does not verify an Amazon session.",
           },
           { headers: { "Cache-Control": "no-store" } }
         );
@@ -1329,8 +1335,8 @@ export async function handleAutoApplyFallback(
   }
   return Response.json(
     {
-      connected: Boolean(prefs.amazonEmail),
-      status: prefs.amazonEmail ? "connected" : "idle",
+      connected: false,
+      status: "sign_in_on_amazon",
       email: prefs.amazonEmail || null,
     },
     { headers: { "Cache-Control": "no-store" } }
@@ -1355,44 +1361,8 @@ export async function handleMonitorFallback(req: NextRequest): Promise<Response>
       }))
       .filter((j) => !filtersOn || j.passes);
 
-    // Enrich best match with live scheduleId so auto-open locks the shift immediately
-    let bestMatchJob = matching[0] || null;
-    if (bestMatchJob && !bestMatchJob.scheduleId) {
-      const schedules = await fetchSchedulesForJob(bestMatchJob.id);
-      const schedId = schedules[0]?.scheduleId || "";
-      if (schedId) {
-        bestMatchJob = {
-          ...bestMatchJob,
-          scheduleId: schedId,
-          applyUrl: buildJobsAtAmazonUrl(bestMatchJob.id, schedId),
-        };
-      }
-    }
-
-    // If autoApplyEnabled is on and bestMatchJob is a 100% match, auto-record progression to Assessment
-    if (
-      prefs.autoApplyEnabled &&
-      bestMatchJob &&
-      (bestMatchJob.matchScore ?? 0) >= 100 &&
-      !storedApplied.some((a) => a.id === bestMatchJob!.id)
-    ) {
-      const application = await handleJobApplyFallback(
-        req,
-        JSON.stringify({
-          jobId: bestMatchJob.id,
-          scheduleId: bestMatchJob.scheduleId,
-          title: bestMatchJob.title,
-          location: bestMatchJob.location,
-          category: bestMatchJob.category,
-          jobType: bestMatchJob.jobType,
-          matchScore: bestMatchJob.matchScore,
-        })
-      );
-      if (!application.ok) {
-        cachedJobsExpiresAt = 0;
-        return application;
-      }
-    }
+    matching.sort((a, b) => b.matchScore - a.matchScore);
+    const bestMatchJob = matching[0] || null;
 
     return Response.json(
       {
@@ -1402,7 +1372,7 @@ export async function handleMonitorFallback(req: NextRequest): Promise<Response>
         newJobsCount: matching.length,
         totalJobs: rawJobs.length,
         newJobs: matching.length,
-        autoApplied: storedApplied.length,
+        autoApplied: storedApplied.filter(job => job.applicationStatus === "applied").length,
         jobs: matching.slice(0, 20),
         bestMatchJob,
       },
@@ -1487,9 +1457,9 @@ export async function handleJobApplyFallback(
     postedAt: new Date().toISOString(),
     isNew: false,
     matchScore,
-    autoApplied: true,
+    autoApplied: false,
     appliedAt: new Date().toISOString(),
-    applicationStatus: "link_opened",
+    applicationStatus: "application_prepared",
   };
 
   memoryAppliedJobs = [
@@ -1511,7 +1481,7 @@ export async function handleJobApplyFallback(
           jobType,
           applyUrl,
           matchScore,
-          status: "link_opened",
+          status: "application_prepared",
           appliedAt: new Date(),
         },
       },
