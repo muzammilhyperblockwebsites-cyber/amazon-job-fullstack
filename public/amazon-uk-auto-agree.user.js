@@ -93,7 +93,8 @@
   function fill(element, value) {
     if (value === undefined || value === null || value === "" || element.disabled || element.readOnly || element.value === String(value)) return;
     // Preserve an existing answer or a correction made in the Amazon form.
-    if (element.value && !changed.has(element)) return;
+    const placeholder = element.tagName === "SELECT" && element.selectedOptions[0]?.disabled;
+    if (element.value && !placeholder) return;
     const proto = element.tagName === "SELECT" ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
     Object.getOwnPropertyDescriptor(proto, "value").set.call(element, String(value));
     element.dispatchEvent(new Event("input", { bubbles: true }));
@@ -182,7 +183,9 @@
   }
   function clickOnce(element) {
     if (!visible(element) || element.disabled || element.getAttribute("aria-disabled") === "true") return false;
-    const key = location.hash + "|" + text(element);
+    const fields = Array.from(document.querySelectorAll("input,select")).filter(visible).map(input => [input.name, input.type, input.value, input.checked]);
+    const headings = Array.from(document.querySelectorAll("h1,h2,legend")).filter(visible).map(text);
+    const key = location.hash + "|" + text(element) + "|" + JSON.stringify([fields, headings]);
     if (clicks.get(element) === key || routeClicks >= 8 || Date.now() - lastClick < 1800) return false;
     const form = element.closest("form");
     if (form && !form.checkValidity()) { say("Complete the highlighted required fields on Amazon; the helper will resume."); return false; }
