@@ -463,9 +463,8 @@ const JobFeed = forwardRef<JobFeedHandle>((_, ref) => {
                 {storedAppliedJobs.length} Saved in Database)
               </h3>
               <p className="text-xs text-green-700 mt-0.5">
-                🔒 Ye jobs tool ne auto-claim kar ke save kar li hain. Official
-                Amazon website se khatam honay ke haftay baad bhi aap yahan se
-                apply kar saktay hain!
+                Saved application activity. Availability is checked again before
+                opening; expired shifts cannot be reserved from saved history.
               </p>
             </div>
             <button

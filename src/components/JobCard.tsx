@@ -32,7 +32,7 @@ function timeAgo(isoStr: string): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-// Build an official application link that auto-starts and advances to Assessment.
+// Build an official application link for the selected job and schedule.
 export function getDirectAmazonApplyUrl(
   jobId: string,
   fallbackUrl?: string,
@@ -85,7 +85,7 @@ export default function JobCard({ job }: { job: Job }) {
   );
 
   async function openApplication() {
-    const tab = window.open(directUrl, "_blank");
+    const tab = window.open("about:blank", "_blank");
     setLoading(true);
     setError("");
     try {
@@ -103,15 +103,15 @@ export default function JobCard({ job }: { job: Job }) {
           matchScore: job.matchScore,
         }),
       });
-      if (!response.ok)
-        throw new Error("The link opened, but activity could not be saved.");
       const result = await response.json();
-      if (tab && !tab.closed && result.applyUrl && result.scheduleId && !job.scheduleId) {
+      if (!response.ok) throw new Error(result.error || "Shift availability could not be verified.");
+      if (tab && !tab.closed && result.applyUrl && result.scheduleId) {
         tab.location.href = result.applyUrl;
       }
-      setStatus(result.job?.applicationStatus || "assessment_ready");
+      setStatus(result.job?.applicationStatus || "link_opened");
       window.dispatchEvent(new CustomEvent("stats-refresh"));
     } catch (err) {
+      tab?.close();
       setError(
         err instanceof Error ? err.message : "Activity could not be saved"
       );
@@ -149,10 +149,10 @@ export default function JobCard({ job }: { job: Job }) {
       {status && (
         <p className="text-sm font-medium text-green-700">
           {status === "assessment_ready"
-            ? "✅ Shift Locked & Advanced to Assessment (#/assessment-consent)"
+            ? "Saved application activity — check progress on Amazon"
             : applied
             ? "✅ Submission verified"
-            : "Opened — advancing to Assessment"}
+            : "Application link ready — complete your application on Amazon"}
         </p>
       )}
       {error && (
@@ -167,8 +167,8 @@ export default function JobCard({ job }: { job: Job }) {
         className="rounded-lg bg-orange-500 hover:bg-orange-600 text-white font-semibold text-sm px-4 py-2 disabled:opacity-50 cursor-pointer"
       >
         {loading
-          ? "Locking Shift & Advancing to Assessment…"
-          : "⚡ Auto-Apply & Advance to Assessment"}
+          ? "Checking live shift…"
+          : "Check shift & open application"}
       </button>
     </article>
   );

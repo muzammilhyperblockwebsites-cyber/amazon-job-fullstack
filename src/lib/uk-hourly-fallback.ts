@@ -254,16 +254,17 @@ async function getHvhToken(forceRefresh = false): Promise<string> {
 }
 
 export async function fetchSchedulesForJob(
-  jobId: string
+  jobId: string,
+  forceRefresh = false
 ): Promise<RawScheduleCard[]> {
   if (!jobId) return [];
   const now = Date.now();
   const hit = scheduleCache.get(jobId);
-  if (hit && now < hit.expiresAt) return hit.cards;
+  if (!forceRefresh && hit && now < hit.expiresAt) return hit.cards.filter(isAvailableSchedule);
 
   try {
     const token = await getHvhToken(false);
-    const today = new Date().toISOString().split("T")[0];
+    const today = ukToday();
     const searchScheduleRequest = {
       locale: "en-GB",
       country: "United Kingdom",
@@ -295,24 +296,42 @@ export async function fetchSchedulesForJob(
       cache: "no-store",
     });
     const json = (await res.json()) as {
+      errors?: unknown[];
       data?: { searchScheduleCards?: { scheduleCards?: RawScheduleCard[] } };
     };
-    const rawCards = json?.data?.searchScheduleCards?.scheduleCards ?? [];
+    const rawCards = json?.data?.searchScheduleCards?.scheduleCards;
+    if (!res.ok || json.errors?.length || !Array.isArray(rawCards)) {
+      throw new Error("Live schedule availability could not be verified. Please retry.");
+    }
     const cards = rawCards
-      .filter(
-        (s) =>
-          (s.laborDemandAvailableCount ?? 1) > 0 && Boolean(s.scheduleId)
-      )
+      .filter((s) => (!s.jobId || s.jobId === jobId) && isAvailableSchedule(s))
       .sort(
         (a, b) =>
           (b.laborDemandAvailableCount ?? 1) -
           (a.laborDemandAvailableCount ?? 1)
       );
-    scheduleCache.set(jobId, { cards, expiresAt: Date.now() + 180_000 });
+    scheduleCache.set(jobId, { cards, expiresAt: Date.now() + 8_000 });
     return cards;
-  } catch {
-    return hit?.cards ?? [];
+  } catch (error) {
+    scheduleCache.delete(jobId);
+    throw error;
   }
+}
+
+function ukToday(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(new Date());
+}
+
+function isAvailableSchedule(schedule: RawScheduleCard): boolean {
+  const startDate = schedule.hireStartDate?.slice(0, 10);
+  return Boolean(
+    schedule.scheduleId &&
+    typeof schedule.laborDemandAvailableCount === "number" &&
+    schedule.laborDemandAvailableCount > 0 &&
+    (!startDate || (/^\d{4}-\d{2}-\d{2}$/.test(startDate) && startDate >= ukToday()))
+  );
 }
 
 function normaliseJob(
@@ -416,7 +435,7 @@ export async function fetchAllUKHourlyJobs(): Promise<{
       containFilters: [{ key: "isPrivateSchedule", val: ["false"] }],
       rangeFilters: [],
       orFilters: [],
-      dateFilters: [{ key: "firstDayOnSite", range: { startDate: new Date().toISOString().split("T")[0] } }],
+      dateFilters: [{ key: "firstDayOnSite", range: { startDate: ukToday() } }],
       sorters: [{ fieldName: "totalPayRateMax", ascending: "false" }],
       pageSize: 100,
       consolidateSchedule: true,
@@ -446,6 +465,7 @@ export async function fetchAllUKHourlyJobs(): Promise<{
       res = await send(token);
     }
     const data = (await res.json()) as {
+      errors?: unknown[];
       data?: {
         searchJobCardsByLocation?: {
           nextToken?: string;
@@ -454,6 +474,9 @@ export async function fetchAllUKHourlyJobs(): Promise<{
       };
     };
     const result = data?.data?.searchJobCardsByLocation;
+    if (!res.ok || data.errors?.length || !Array.isArray(result?.jobCards)) {
+      throw new Error("Official UK jobs could not be verified. Please retry.");
+    }
     const cards = Array.isArray(result?.jobCards) ? result.jobCards : [];
     for (const card of cards) {
       const id = card.jobId || card.id || "";
@@ -466,10 +489,15 @@ export async function fetchAllUKHourlyJobs(): Promise<{
   } while (nextToken && rawList.length < 500);
 
   const map = new Map<string, HourlyJob>();
-  for (const raw of rawList) {
-    const id = String(raw.jobId || raw.id || "");
-    const sched = scheduleCache.get(id)?.cards ?? [];
-    map.set(id, normaliseJob(raw, sched));
+  const unique = Array.from(new Map(rawList.map((raw) => [String(raw.jobId || raw.id), raw])).values());
+  // Bound requests while verifying every job, including jobs with stale summary counts.
+  for (let offset = 0; offset < unique.length; offset += 8) {
+    const verified = await Promise.all(unique.slice(offset, offset + 8).map(async (raw) => {
+      const id = String(raw.jobId || raw.id || "");
+      const schedules = await fetchSchedulesForJob(id);
+      return schedules.length ? normaliseJob(raw, schedules) : null;
+    }));
+    for (const job of verified) if (job) map.set(job.id, job);
   }
   const jobs = Array.from(map.values());
   const fetchedAt = new Date().toISOString();
@@ -1348,7 +1376,7 @@ export async function handleMonitorFallback(req: NextRequest): Promise<Response>
       (bestMatchJob.matchScore ?? 0) >= 100 &&
       !storedApplied.some((a) => a.id === bestMatchJob!.id)
     ) {
-      await handleJobApplyFallback(
+      const application = await handleJobApplyFallback(
         req,
         JSON.stringify({
           jobId: bestMatchJob.id,
@@ -1360,6 +1388,10 @@ export async function handleMonitorFallback(req: NextRequest): Promise<Response>
           matchScore: bestMatchJob.matchScore,
         })
       );
+      if (!application.ok) {
+        cachedJobsExpiresAt = 0;
+        return application;
+      }
     }
 
     return Response.json(
@@ -1417,9 +1449,27 @@ export async function handleJobApplyFallback(
       // ignore
     }
   }
-  if (jobId && !scheduleId) {
-    const schedules = await fetchSchedulesForJob(jobId);
-    scheduleId = schedules[0]?.scheduleId || "";
+  if (!/^(JOB-UK-[A-Za-z0-9_-]+|a0R[A-Za-z0-9]+)$/.test(jobId)) {
+    return Response.json({ error: "A valid Amazon UK job ID is required." }, { status: 400 });
+  }
+  try {
+    const schedules = await fetchSchedulesForJob(jobId, true);
+    const selected = scheduleId
+      ? schedules.find((schedule) => schedule.scheduleId === scheduleId)
+      : schedules[0];
+    if (!selected) {
+      cachedJobsExpiresAt = 0;
+      return Response.json(
+        { error: "This shift has expired or is no longer available. Refresh jobs to choose a live shift." },
+        { status: 409, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+    scheduleId = selected.scheduleId!;
+  } catch {
+    return Response.json(
+      { error: "Live shift availability could not be verified. Please retry." },
+      { status: 503, headers: { "Cache-Control": "no-store" } }
+    );
   }
   const applyUrl = buildJobsAtAmazonUrl(jobId, scheduleId);
   const jobRecord: HourlyJob = {
@@ -1439,7 +1489,7 @@ export async function handleJobApplyFallback(
     matchScore,
     autoApplied: true,
     appliedAt: new Date().toISOString(),
-    applicationStatus: "assessment_ready",
+    applicationStatus: "link_opened",
   };
 
   memoryAppliedJobs = [
@@ -1461,7 +1511,7 @@ export async function handleJobApplyFallback(
           jobType,
           applyUrl,
           matchScore,
-          status: "assessment_ready",
+          status: "link_opened",
           appliedAt: new Date(),
         },
       },
