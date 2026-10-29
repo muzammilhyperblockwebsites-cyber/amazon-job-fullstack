@@ -5,14 +5,14 @@ import { useSSE } from "@/hooks/useSSE";
 import { readApiResponse } from '@/lib/api-response';
 
 interface Stats {
-  totalJobs: number;
-  matchingJobs?: number;
-  newToday: number;
-  avgMatchScore: number;
+  totalJobs: number | null;
+  matchingJobs?: number | null;
+  newToday: number | null;
+  avgMatchScore: number | null;
   lastChecked: string | null;
   isMonitoring: boolean;
-  autoAppliedTotal: number;
-  jobFeed?: { provider: string; stale: boolean; fetchedAt?: string };
+  autoAppliedTotal: number | null;
+  jobFeed?: { provider: string; stale: boolean; available?: boolean; fetchedAt?: string };
 }
 
 interface FilterOverride {
@@ -83,12 +83,8 @@ export default function StatsBar({ onReset }: { onReset?: () => void }) {
       if (res) {
         const data = await readApiResponse(res);
         if (generation !== requestGeneration.current) return;
-        setStatsError(null);
-        setStats((prev) => ({
-          ...data,
-          lastChecked:
-            data.lastChecked ?? prev?.lastChecked ?? new Date().toISOString(),
-        }));
+        setStatsError(data.availabilityError || null);
+        setStats(data);
       }
     } catch (error) {
       if (generation !== requestGeneration.current) return;
@@ -222,31 +218,31 @@ export default function StatsBar({ onReset }: { onReset?: () => void }) {
   const cards = [
     {
       label: "Jobs Tracked",
-      value: stats.totalJobs.toLocaleString(),
-      sub: stats.jobFeed?.stale ? 'Cached official UK hourly jobs' : 'Official UK hourly job cards',
+      value: stats.totalJobs?.toLocaleString() ?? '—',
+      sub: stats.jobFeed?.available === false ? 'Live count temporarily unavailable' : stats.jobFeed?.stale ? 'Cached official UK hourly jobs' : 'Official UK hourly job cards',
       icon: "💼",
       colour: "text-blue-600",
     },
     {
       label: "Matched Filter",
-      value: (stats.matchingJobs ?? stats.newToday).toLocaleString(),
+      value: (stats.matchingJobs ?? stats.newToday)?.toLocaleString() ?? '—',
       sub: "Matching your filter",
       icon: "🆕",
       colour: "text-green-600",
     },
     {
       label: "Avg Match",
-      value: `${stats.avgMatchScore}%`,
+      value: stats.avgMatchScore == null ? '—' : `${stats.avgMatchScore}%`,
       sub: "Filter match score",
       icon: "🎯",
       colour: "text-orange-500",
     },
     {
       label: "Verified submissions",
-      value: stats.autoAppliedTotal.toLocaleString(),
+      value: stats.autoAppliedTotal?.toLocaleString() ?? '—',
       sub: stats.lastChecked
         ? `Last check ${timeAgo(stats.lastChecked)}`
-        : "Locked in Vault",
+        : "Saved application records",
       icon: "🚀",
       colour: "text-purple-600",
     },
@@ -254,6 +250,7 @@ export default function StatsBar({ onReset }: { onReset?: () => void }) {
 
   return (
     <div className="mb-5">
+      {statsError && <p role="status" className="border border-amber-200 bg-amber-50 text-amber-900 rounded-lg p-3 mb-3">{statsError} Live counts will return when Amazon allows verification.</p>}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {cards.map((c) => (
           <div

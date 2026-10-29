@@ -14,6 +14,7 @@ export class AutomationWorker {
   private checking = false;
   private heartbeatBusy = false;
   private lastPoll = 0;
+  private retryAt = 0;
   private status: Pick<WorkerRecord, "message" | "lastChecked" | "autoEnabled"> = { message: "Worker ready. Enable automatic preparation in the dashboard.", autoEnabled: false };
   constructor(private db: Db) {}
 
@@ -71,7 +72,7 @@ export class AutomationWorker {
         if (active) await this.launch(active);
         return;
       }
-      if (active || Date.now() - this.lastPoll < 12_000) return;
+      if (active || Date.now() - this.lastPoll < 12_000 || Date.now() < this.retryAt) return;
       this.lastPoll = Date.now();
       const prefs = await getStoredPreferences();
       this.status.autoEnabled = Boolean(prefs.autoApplyEnabled);
@@ -92,7 +93,8 @@ export class AutomationWorker {
       }
       this.status.message = "Monitoring on this PC every 12 seconds. No unattempted matching shift available.";
     } catch (error) {
-      this.status.message = error instanceof Error ? error.message : "Worker check failed; retrying.";
+      this.retryAt = Date.now() + 60_000;
+      this.status.message = (error instanceof Error ? error.message : "Worker check failed.") + " Next monitoring attempt in 60 seconds.";
       console.error(this.status.message);
     } finally { this.checking = false; }
   }

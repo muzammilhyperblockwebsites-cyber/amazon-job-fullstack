@@ -11,6 +11,7 @@ function load(database) {
   delete globalThis._mongoClientPromise;
   const mod = { exports: {} };
   new Function('require', 'module', 'exports', compiled)(name => {
+    if (name === './hosted-job-feed') return require('../src/lib/hosted-job-feed.ts');
     if (name === 'mongodb') return { MongoClient: class { async connect() { if (database) return { db: () => database }; throw new Error('No database in tests'); } } };
     return require(name);
   }, mod, mod.exports);
@@ -133,6 +134,7 @@ test('old-job cleanup archives before deleting, preserves profiles and confirmed
     { _id: 'unverified', jobId: 'JOB-UK-ERROR' },
   ];
   const db = { collection(name) {
+    if (name === 'AvailabilityControl') return { findOne: async () => null };
     if (name === 'AppliedJob') return {
       find(query) { assert.equal(query.jobId.$ne, '__CANDIDATE_PROFILE__'); return { toArray: async () => records }; },
       async deleteOne(query) { assert.ok(archived.some(row => row._id === query._id)); deleted.push(query._id); return { deletedCount: 1 }; },
@@ -187,4 +189,60 @@ test('total schedule service failure remains an error and does not become an emp
     global.fetch = async (url, init) => init?.body && JSON.parse(init.body).operationName === 'searchScheduleCards' ? Response.json({ errors: [{ message: 'Unavailable' }] }) : upstream(url, init);
     await assert.rejects(service.fetchAllUKHourlyJobs(), /could not be verified/);
   } finally { global.fetch = original; }
+});
+
+test('stats stays available during an Amazon outage without claiming zero live jobs or a successful check', async () => {
+  const original = global.fetch;
+  try {
+    const service = load();
+    global.fetch = async () => Response.json({ errors: [{ message: 'Forbidden' }] }, { status: 403 });
+    const response = await service.handleStatsFallback({ method: 'GET', nextUrl: new URL('https://example.invalid/api/stats') });
+    const data = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(data.totalJobs, null); assert.equal(data.matchingJobs, null);
+    assert.equal(data.lastChecked, null); assert.equal(data.isMonitoring, false);
+    assert.equal(data.jobFeed.available, false); assert.equal(data.jobFeed.stale, true);
+    assert.match(data.availabilityError, /403/);
+  } finally { global.fetch = original; }
+});
+
+test('Amazon denial creates a shared cooldown instead of repeating token and search requests', async () => {
+  const original = global.fetch;
+  let paused, calls = 0;
+  const db = { collection: () => ({ findOne: async () => paused || null, updateOne: async (_filter, update) => { paused = update.$set; } }) };
+  try {
+    global.fetch = async url => { calls++; return String(url).includes('/csrf') ? Response.json({ token: 'fixture' }) : Response.json({ errors: [{ errorType: 'WAFForbiddenException' }] }, { status: 403 }); };
+    await assert.rejects(load(db).fetchAllUKHourlyJobs(), /403/);
+    assert.equal(calls, 2);
+    await assert.rejects(load(db).fetchAllUKHourlyJobs(), /paused/);
+    assert.equal(calls, 2);
+  } finally { global.fetch = original; }
+});
+
+test('local worker dashboard uses the hosted feed for monitoring and stats without calling Amazon directly', async () => {
+  const original = global.fetch;
+  const keys = ['VERCEL', 'AUTOMATION_MODE', 'WORKER_DASHBOARD_URL'];
+  const before = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  try {
+    delete process.env.VERCEL; process.env.AUTOMATION_MODE = 'worker'; process.env.WORKER_DASHBOARD_URL = 'https://dashboard.test';
+    let calls = 0;
+    global.fetch = async url => {
+      calls++; assert.equal(new URL(url).origin, 'https://dashboard.test');
+      return Response.json({ source: 'live', totalPages: 1, jobs: [{ id: jobId, scheduleId: 'live', title: 'Warehouse', location: 'London' }], jobFeed: { provider: 'jobsatamazon.co.uk', stale: false, fetchedAt: new Date().toISOString() } });
+    };
+    const service = load();
+    const request = { method: 'GET', nextUrl: new URL('http://localhost/api/stats') };
+    const monitor = await service.handleMonitorFallback(request);
+    const stats = await service.handleStatsFallback(request);
+    assert.equal(monitor.status, 200); assert.equal(stats.status, 200);
+    assert.equal((await monitor.json()).totalJobs, 1); assert.equal((await stats.json()).totalJobs, 1);
+    assert.equal(calls, 1);
+    process.env.VERCEL = '1';
+    const officialApi = api([live]);
+    global.fetch = async (url, init) => { assert.equal(new URL(url).hostname, 'www.jobsatamazon.co.uk'); return officialApi(url, init); };
+    assert.equal((await load().fetchAllUKHourlyJobs()).jobs.length, 1);
+  } finally {
+    global.fetch = original;
+    for (const key of keys) { if (before[key] === undefined) delete process.env[key]; else process.env[key] = before[key]; }
+  }
 });

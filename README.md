@@ -21,6 +21,14 @@ This avoids depending on direct public API access from the PC network. The
 Amazon browser still checks signed-in shift status before proceeding. These are
 tool credentials, not Amazon credentials. If no dashboard URL is set, the worker
 uses direct public API requests.
+The local dashboard in worker mode uses the same hosted feed for jobs, stats,
+monitor checks and live events. If Amazon denies or rate-limits its public API,
+all hosted instances share a database cooldown and the worker waits before
+retrying. The dashboard reports the upstream failure; unavailable or stale data
+is never treated as a live shift that can be applied to.
+Stats stays accessible with `200 OK` during an upstream outage, using null live
+counts and `jobFeed.available=false`; its UI shows dashes and the reason. Job
+availability and application checks still fail closed while verification fails.
 
 Sign into the online dashboard, save filters/profile, and enable automatic
 preparation. **PC worker connected** and its last job check appear in Application

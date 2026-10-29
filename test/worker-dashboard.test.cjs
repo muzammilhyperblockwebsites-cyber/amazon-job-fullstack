@@ -14,7 +14,7 @@ async function setup(run) {
   process.env.WORKER_DASHBOARD_URL = 'https://dashboard.test';
   process.env.TOOL_LOGIN_EMAIL = 'fixture-user'; process.env.TOOL_LOGIN_PASSWORD = 'fixture-password';
   const mod = { exports: {} };
-  new Function('require', 'module', 'exports', code)(name => name === './uk-hourly-fallback' ? {
+  new Function('require', 'module', 'exports', code)(name => name === './hosted-job-feed' ? require('../src/lib/hosted-job-feed.ts') : name === './uk-hourly-fallback' ? {
     fetchAllUKHourlyJobs() { throw new Error('PC public API must not be used when the dashboard is configured'); },
     handleJobApplyFallback() { throw new Error('Preparation must use the dashboard'); },
   } : require(name), mod, mod.exports);
@@ -26,7 +26,7 @@ test('worker obtains paginated, fresh verified shifts from the configured dashbo
   const calls = [];
   global.fetch = async url => { calls.push(String(url)); return Response.json({ ...liveFeed([job]), totalPages: 2 }); };
   const result = await api.workerJobs();
-  assert.equal(result.jobs.length, 2); assert.equal(calls.length, 2);
+  assert.equal(result.jobs.length, 1); assert.equal(calls.length, 2);
   assert.match(calls[0], /https:\/\/dashboard.test\/api\/jobs\?filterOverride=1/);
   assert.match(calls[1], /page=2/);
 }));

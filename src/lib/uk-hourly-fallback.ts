@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { MongoClient, Db } from "mongodb";
+import { dashboardUrl, fetchHostedJobs } from "./hosted-job-feed";
 
 const CSRF_URL =
   "https://www.jobsatamazon.co.uk/authorize/api/csrf?countryCode=UK";
@@ -178,6 +179,30 @@ export async function getDb(): Promise<Db | null> {
 
 let cachedToken: string | null = null;
 let cachedTokenExpiresAt = 0;
+let publicApiPausedUntil = 0;
+let pauseCheckedAt = 0;
+const pauseMessage = "Amazon is temporarily rejecting availability checks (HTTP 403/429). Monitoring is paused for at least 60 seconds before retrying.";
+async function ensurePublicApiAvailable() {
+  if (Date.now() < publicApiPausedUntil) throw new Error(pauseMessage);
+  if (Date.now() - pauseCheckedAt < 5000) return;
+  pauseCheckedAt = Date.now();
+  const db = await getDb();
+  const state = await db?.collection<{ _id: string; pausedUntil: Date }>("AvailabilityControl").findOne({ _id: "amazon-public-api" });
+  if (state?.pausedUntil) publicApiPausedUntil = new Date(state.pausedUntil).getTime();
+  if (Date.now() < publicApiPausedUntil) throw new Error(pauseMessage);
+}
+async function checkPublicResponse(response: Response, action: string) {
+  if (response.ok) return;
+  if (response.status === 403 || response.status === 429) {
+    const retrySeconds = Math.min(900, Math.max(60, Number(response.headers.get("retry-after")) || 60));
+    publicApiPausedUntil = Date.now() + retrySeconds * 1000;
+    await response.body?.cancel();
+    const db = await getDb();
+    await db?.collection<{ _id: string; pausedUntil: Date }>("AvailabilityControl").updateOne({ _id: "amazon-public-api" }, { $set: { pausedUntil: new Date(publicApiPausedUntil) } }, { upsert: true });
+    throw new Error(pauseMessage);
+  }
+  throw new Error(`Amazon ${action} is unavailable (HTTP ${response.status}). Please retry shortly.`);
+}
 let cachedJobs: HourlyJob[] | null = null;
 let cachedJobsExpiresAt = 0;
 let cachedFetchedAt: string | null = null;
@@ -250,6 +275,7 @@ export function buildJobsAtAmazonUrl(jobId: string, scheduleId = ""): string {
 }
 
 async function getHvhToken(forceRefresh = false): Promise<string> {
+  await ensurePublicApiAvailable();
   const now = Date.now();
   if (!forceRefresh && cachedToken && now < cachedTokenExpiresAt) {
     return cachedToken;
@@ -257,7 +283,9 @@ async function getHvhToken(forceRefresh = false): Promise<string> {
   const res = await fetch(CSRF_URL, {
     headers: BASE_HEADERS,
     cache: "no-store",
+    signal: AbortSignal.timeout(15000),
   });
+  await checkPublicResponse(res, "session check");
   const data = (await res.json()) as { token?: string };
   if (!data?.token) {
     throw new Error("Failed to obtain CSRF token from jobsatamazon.co.uk");
@@ -308,7 +336,9 @@ export async function fetchSchedulesForJob(
         query: SEARCH_SCHEDULE_CARDS_QUERY,
       }),
       cache: "no-store",
+      signal: AbortSignal.timeout(15000),
     });
+    await checkPublicResponse(res, "schedule check");
     const json = (await res.json()) as {
       errors?: unknown[];
       data?: { searchScheduleCards?: { scheduleCards?: RawScheduleCard[] } };
@@ -436,6 +466,16 @@ export async function fetchAllUKHourlyJobs(): Promise<{
     return { jobs: cachedJobs.filter(job => !wasRejected(job.id, job.scheduleId)), fetchedAt: cachedFetchedAt, unverifiedJobs: cachedUnverifiedJobs };
   }
 
+  // A local dashboard shares the worker's verified hosted feed. Vercel itself
+  // always contacts Amazon directly, preventing a proxy loop.
+  const hostedOrigin = !process.env.VERCEL && process.env.AUTOMATION_MODE === "worker" ? dashboardUrl() : null;
+  if (hostedOrigin && !["localhost", "127.0.0.1", "[::1]"].includes(new URL(hostedOrigin).hostname)) {
+    const result = await fetchHostedJobs(hostedOrigin);
+    cachedJobs = result.jobs; cachedFetchedAt = result.fetchedAt; cachedUnverifiedJobs = result.unverifiedJobs;
+    cachedJobsExpiresAt = Date.now() + 8_000;
+    return { ...result, jobs: result.jobs.filter(job => !wasRejected(job.id, job.scheduleId)) };
+  }
+
   let token = await getHvhToken(false);
   const rawList: RawJobCard[] = [];
   let nextToken: string | undefined;
@@ -472,13 +512,15 @@ export async function fetchAllUKHourlyJobs(): Promise<{
           query: SEARCH_JOB_CARDS_QUERY,
         }),
         cache: "no-store",
+        signal: AbortSignal.timeout(15000),
       });
 
     let res = await send(token);
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 401) {
       token = await getHvhToken(true);
       res = await send(token);
     }
+    await checkPublicResponse(res, "job search");
     const data = (await res.json()) as {
       errors?: unknown[];
       data?: {
@@ -1259,14 +1301,20 @@ export async function handleStatsFallback(req: NextRequest): Promise<Response> {
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (err) {
+    const saved = await getStoredAppliedJobs().catch(() => null);
     return Response.json(
       {
-        error:
+        totalJobs: null, matchingJobs: null, newToday: null, avgMatchScore: null,
+        lastChecked: null, isMonitoring: false,
+        autoAppliedTotal: saved ? saved.filter(job => job.applicationStatus === "applied").length : null,
+        jobFeed: { provider: "jobsatamazon.co.uk", available: false, stale: true, complete: false },
+        retryAfterSeconds: 60,
+        availabilityError:
           err instanceof Error
             ? err.message
             : "Official UK job counts are unavailable",
       },
-      { status: 503, headers: { "Cache-Control": "no-store" } }
+      { headers: { "Cache-Control": "no-store" } }
     );
   }
 }
