@@ -5,8 +5,8 @@ import { randomUUID } from "node:crypto";
 
 type Stage = "starting" | "running" | "needs_input" | "waiting_login" | "shift_unavailable" | "assessment_ready" | "failed" | "stopped";
 export type BrowserTask = { id: string; jobId: string; scheduleId: string; title: string; stage: Stage; message: string; shiftReserved: boolean; applicationId?: string; updatedAt: string };
-type InternalTask = BrowserTask & { page?: Page; timer?: ReturnType<typeof setInterval>; busy?: boolean; startedAt: number; loginResumes?: number };
-type Launch = { jobId: string; scheduleId: string; title: string; applyUrl: string; profile: Record<string, unknown> };
+type InternalTask = BrowserTask & { page?: Page; timer?: ReturnType<typeof setInterval>; busy?: boolean; startedAt: number; loginResumes?: number; leaseExpiresAt?: number };
+type Launch = { jobId: string; scheduleId: string; title: string; applyUrl: string; profile: Record<string, unknown>; leaseExpiresAt?: number };
 type State = { context?: BrowserContext; opening?: Promise<BrowserContext>; starting: boolean; tasks: Map<string, InternalTask> };
 const globals = globalThis as typeof globalThis & { amazonDesktopBrowser?: State };
 const state: State = globals.amazonDesktopBrowser ??= { starting: false, tasks: new Map<string, InternalTask>() };
@@ -41,7 +41,7 @@ async function browser(): Promise<BrowserContext> {
     ] : process.platform === "darwin" ? ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"] : ["/usr/bin/google-chrome", "/usr/bin/microsoft-edge", "/usr/bin/chromium", "/usr/bin/chromium-browser"];
     const executablePath = candidates.find(candidate => existsSync(candidate));
     if (!executablePath) throw new Error("Install Microsoft Edge or Google Chrome, then retry. No extension is needed.");
-    const context = await chromium.launchPersistentContext(path.join(process.cwd(), ".amazon-session/desktop"), {
+    const context = await chromium.launchPersistentContext(path.resolve(/* turbopackIgnore: true */ process.cwd(), process.env.AMAZON_BROWSER_PROFILE || ".amazon-session/desktop"), {
       executablePath, headless: false, viewport: null, locale: "en-GB", timeout: 30000,
     });
     context.on("close", () => {
@@ -90,8 +90,10 @@ export async function startBrowserApplication(input: Launch, onUnavailable?: () 
       } catch { /* Non-JSON responses are not reservation evidence. */ }
     });
     const source = readFileSync(path.join(process.cwd(), "browser-helper/content.js"), "utf8");
-    const launch = { ...input, expiresAt: Date.now() + 30 * 60 * 1000 };
-    await page.addInitScript({ content: `(function(managedLaunch){${source}\n})(${JSON.stringify(launch)});` });
+    const launch = { ...input, leaseId: task.id, expiresAt: Date.now() + 30 * 60 * 1000 };
+    task.leaseExpiresAt = input.leaseExpiresAt;
+    if (input.leaseExpiresAt) await page.exposeFunction("__amazonMonitorWorkerLease", () => task.leaseExpiresAt);
+    await page.addInitScript({ content: `(async function(managedLaunch){if(managedLaunch.leaseExpiresAt){try{managedLaunch.leaseExpiresAt=await window.__amazonMonitorWorkerLease();}catch{return;}}${source}\n})(${JSON.stringify(launch)});` });
     await page.goto(url.toString(), { waitUntil: "domcontentloaded", timeout: 45000 });
     await page.bringToFront();
     update(task, "running", "Amazon browser opened. The tool will click I Agree and continue. Sign in once if Amazon asks.");
@@ -129,4 +131,19 @@ export async function stopBrowserTask(id: string): Promise<BrowserTask | null> {
     await task.page.evaluate(() => { window.dispatchEvent(new Event("amazon-monitor-stop")); }).catch(() => {});
   }
   return snapshot(task);
+}
+
+export async function renewBrowserLease(expiresAt: number) {
+  for (const task of state.tasks.values()) if (task.leaseExpiresAt && !terminal.has(task.stage)) task.leaseExpiresAt = expiresAt;
+  if (!state.context) return;
+  await Promise.all(state.context.pages().map(page => page.evaluate(deadline => {
+    const scope = globalThis as typeof globalThis & { __amazonWorkerLeaseKey?: string };
+    if (scope.__amazonWorkerLeaseKey) sessionStorage.setItem(scope.__amazonWorkerLeaseKey, String(deadline));
+  }, expiresAt).catch(() => {})));
+}
+
+export async function closeBrowser() {
+  for (const task of state.tasks.values()) if (!terminal.has(task.stage)) await stopBrowserTask(task.id);
+  const context = state.context || await state.opening?.catch(() => undefined);
+  await context?.close();
 }

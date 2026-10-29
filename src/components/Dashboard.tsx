@@ -161,8 +161,8 @@ export default function Dashboard() {
                 <strong className="text-gray-800">
                   Amazon UK Login (jobsatamazon.co.uk/app#/login)
                 </strong>{" "}
-                in a new tab so Auto-Apply redirects open directly with your
-                Amazon session logged in
+                in a new tab. Sign in separately in the worker&apos;s Amazon browser
+                when it opens your application.
               </span>
             </label>
 
@@ -207,7 +207,7 @@ export default function Dashboard() {
               href="https://www.jobsatamazon.co.uk/app#/login"
               target="_blank"
               className="text-xs bg-white/10 hover:bg-white/20 text-orange-300 px-3 py-1.5 rounded-lg font-medium transition-colors"
-              title="Sign in on jobsatamazon.co.uk so Auto-Apply tabs open with your login active"
+              title="Open Amazon login. The PC worker keeps its own saved Amazon session."
             >
               🔑 Amazon UK Login ↗
             </a>

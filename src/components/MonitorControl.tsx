@@ -79,6 +79,7 @@ const MonitorControl = forwardRef<
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [autoEnabled, setAutoEnabled] = useState(false);
+  const [workerMode, setWorkerMode] = useState<boolean | null>(null);
   const [logs, setLogs] = useState<ApplicationLog[]>([]);
   const [jobs, setJobs] = useState<SSEJobEvent[]>([]);
   const notifiedIds = useRef(new Set<string>());
@@ -87,12 +88,14 @@ const MonitorControl = forwardRef<
   const { notify, requestPermission } = useNotifications();
 
   const refresh = useCallback(async () => {
-    const [agent, prefs] = await Promise.all([
+    const [agent, prefs, capability] = await Promise.all([
       jsonRequest("/api/agent"),
       jsonRequest("/api/preferences"),
+      jsonRequest("/api/desktop?capability=1"),
     ]);
     setLogs(agent.logs || []);
     setAutoEnabled(Boolean(prefs.autoApplyEnabled));
+    setWorkerMode(capability.mode === "worker");
   }, []);
 
   useEffect(() => {
@@ -157,12 +160,12 @@ const MonitorControl = forwardRef<
 
   // Automatic background polling when Auto-Apply is enabled
   useEffect(() => {
-    if (!autoEnabled) return;
+    if (!autoEnabled || workerMode !== false) return;
     const interval = setInterval(() => {
       void poll(null, true);
     }, 12_000);
     return () => clearInterval(interval);
-  }, [autoEnabled, poll]);
+  }, [autoEnabled, poll, workerMode]);
 
   useImperativeHandle(ref, () => ({ pollAndAutoOpenBestMatch: poll }), [poll]);
 
@@ -179,7 +182,7 @@ const MonitorControl = forwardRef<
       }
       setMessage(
         data.autoApplyEnabled
-          ? "Automatic preparation enabled. The first 100% match starts in the tool's Amazon browser."
+          ? workerMode ? "Automatic preparation saved. The connected PC worker checks matches even after this dashboard closes." : "Automatic preparation enabled. The first 100% match starts in the tool's Amazon browser."
           : "Automatic preparation disabled."
       );
     } catch (error) {
@@ -226,7 +229,7 @@ const MonitorControl = forwardRef<
             }`}
           />
           {autoEnabled
-            ? "Monitoring active (every 12s)"
+            ? workerMode ? "Automatic preparation enabled — see PC worker status below" : "Monitoring active (every 12s)"
             : "Auto-Apply Paused"}
         </span>
 
@@ -249,11 +252,11 @@ const MonitorControl = forwardRef<
 
       <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900 flex flex-wrap items-center justify-between gap-2">
         <div>
-          <strong>Built-in Amazon browser:</strong>{" "}
-          No extension or userscript installation. Save your profile, then click Apply.
-          The tool checks the shift, clicks I Agree and continues to assessment.
-          Sign in once in its Amazon browser if requested. OTP/CAPTCHA and unknown
-          questions pause automation.
+          <strong>{workerMode ? "Connected PC browser:" : "Built-in Amazon browser:"}</strong>{" "}
+          {workerMode ? "Keep the PC worker running and the PC awake. You can close this dashboard. Apply opens Amazon on that PC. " : "Keep this dashboard open for automatic checks. "}
+          Save your profile, then click Apply. The tool checks the shift and continues
+          to assessment. Sign in in its Amazon browser if requested.
+          OTP/CAPTCHA and unknown questions pause automation.
         </div>
       </div>
 

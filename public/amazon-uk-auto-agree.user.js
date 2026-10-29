@@ -72,6 +72,14 @@
   const changed = new WeakSet();
   let verifiedAt = 0;
   let stopped = false;
+  if (managed?.leaseExpiresAt) globalThis.__amazonWorkerLeaseKey = "agm-worker-lease:" + managed.leaseId;
+  function leaseValid() {
+    const deadline = Math.max(Number(sessionStorage.getItem(globalThis.__amazonWorkerLeaseKey)) || 0, managed?.leaseExpiresAt || 0);
+    if (!managed?.leaseExpiresAt || Date.now() < deadline) return true;
+    stopped = true;
+    say("PC worker connection expired. Automation stopped; review progress before retrying.", "stopped");
+    return false;
+  }
   window.addEventListener("amazon-monitor-stop", () => {
     stopped = true;
     if (launch) sessionStorage.setItem("agm-stopped", `${launch.jobId}:${launch.scheduleId}`);
@@ -205,6 +213,7 @@
     return true;
   }
   function clickOnce(element) {
+    if (stopped || !leaseValid()) return false;
     if (!visible(element) || element.disabled || element.getAttribute("aria-disabled") === "true") return false;
     const fields = Array.from(document.querySelectorAll("input,select")).filter(visible).map(input => [input.name, input.type, input.value, input.checked]);
     const headings = Array.from(document.querySelectorAll("h1,h2,legend")).filter(visible).map(text);
@@ -220,6 +229,7 @@
   }
   async function tick() {
     if (stopped || running || !launch || !document.body) return;
+    if (!leaseValid()) return;
     running = true;
     try {
       if (Date.now() >= launch.expiresAt) { sessionStorage.removeItem("agm-active"); say("Application helper session expired. Start again from the dashboard."); launch = null; return; }

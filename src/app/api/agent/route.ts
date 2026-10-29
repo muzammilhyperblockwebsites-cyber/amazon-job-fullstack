@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { handleAgentFallback } from "@/lib/uk-hourly-fallback";
 import { authenticatedToolUser } from "@/lib/tool-session";
+import { automationDb, usesWorker } from "@/lib/automation-store";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -13,6 +14,10 @@ export async function GET(req: NextRequest) {
 
 async function mutate(req: NextRequest) {
   if (!authenticatedToolUser(req)) return Response.json({ error: "Sign in to save your candidate profile." }, { status: 401 });
+  if (usesWorker()) {
+    try { await automationDb(); }
+    catch { return Response.json({ error: "Database unavailable. Your profile was not saved to the worker." }, { status: 503 }); }
+  }
   const rawBody = await req.text();
   return handleAgentFallback(req, rawBody);
 }

@@ -2,12 +2,15 @@ import { NextRequest } from "next/server";
 import { authenticatedToolUser } from "@/lib/tool-session";
 import { browserTask, browserTasks, desktopCapability, startBrowserApplication, stopBrowserTask } from "@/lib/desktop-browser";
 import { handleAgentFallback, handleJobApplyFallback, markScheduleUnavailable } from "@/lib/uk-hourly-fallback";
+import { usesWorker } from "@/lib/automation-store";
+import { handleWorkerRequest } from "@/lib/automation-api";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 const headers = { "Cache-Control": "no-store" };
 export async function GET(req: NextRequest) {
+  if (usesWorker()) return handleWorkerRequest(req);
   if (req.nextUrl.searchParams.get("capability") === "1") return Response.json(desktopCapability(), { headers });
   if (!authenticatedToolUser(req)) return Response.json({ error: "Sign in to view application progress." }, { status: 401, headers });
   const id = req.nextUrl.searchParams.get("id");
@@ -16,6 +19,7 @@ export async function GET(req: NextRequest) {
   return Response.json(id ? { task } : { ...desktopCapability(), tasks: browserTasks() }, { headers });
 }
 export async function POST(req: NextRequest) {
+  if (usesWorker()) return handleWorkerRequest(req);
   if (!authenticatedToolUser(req)) return Response.json({ error: "Sign in to start the Amazon browser." }, { status: 401, headers });
   if (!desktopCapability().available) return Response.json({ error: desktopCapability().message, localUrl: desktopCapability().localUrl }, { status: 503, headers });
   try {
@@ -35,6 +39,7 @@ export async function POST(req: NextRequest) {
   }
 }
 export async function DELETE(req: NextRequest) {
+  if (usesWorker()) return handleWorkerRequest(req);
   if (!authenticatedToolUser(req)) return Response.json({ error: "Sign in to stop automation." }, { status: 401, headers });
   const id = req.nextUrl.searchParams.get("id") || "";
   const task = await stopBrowserTask(id);

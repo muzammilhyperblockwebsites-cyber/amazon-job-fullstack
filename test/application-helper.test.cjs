@@ -8,7 +8,7 @@ const id = '12345678-1234-1234-1234-123456789abc';
 const profile = { firstName: 'Test', lastName: 'Candidate', phone: '07000000000', postcode: 'SW1A 1AA', over18: true, declarationsConfirmed: true };
 const flush = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setImmediate(resolve)); };
 
-async function page(html, hash = '/profile', extras = {}) {
+async function page(html, hash = '/profile', extras = {}, managedOptions) {
   const dom = new JSDOM(html, { url: `https://www.jobsatamazon.co.uk/application/uk/?jobId=JOB-UK-123&scheduleId=SCH-123#${hash}?agmLaunch=${id}`, runScripts: 'outside-only' });
   const w = dom.window;
   let interval;
@@ -23,10 +23,27 @@ async function page(html, hash = '/profile', extras = {}) {
     requests++;
     return { ok: true, json: async () => String(url).includes('/csrf') ? { token: 'test' } : { data: { searchScheduleCards: { scheduleCards: [{ scheduleId: 'SCH-123', jobId: 'JOB-UK-123', laborDemandAvailableCount: 1, hireStartDate: '2099-01-01' }] } } } };
   };
-  w.eval(source);
+  if (managedOptions) {
+    w.document.querySelector('button')?.addEventListener('click', () => { w.clicked = true; });
+    if (managedOptions.renewedUntil) w.sessionStorage.setItem('agm-worker-lease:lease-test', String(managedOptions.renewedUntil));
+    w.eval(`(function(managedLaunch){${source}\n})(${JSON.stringify({ ...w.GM_getValue(), leaseId: 'lease-test', ...managedOptions })});`);
+  } else w.eval(source);
   await flush();
   return { w, dom, requests: () => requests, async tick() { now += 2000; interval?.(); await flush(); } };
 }
+
+test('worker lease expiry prevents form edits and clicks, while a renewed lease survives navigation', async () => {
+  const html = '<input name="firstName"><button type="button">Next</button>';
+  const expired = await page(html, '/profile', {}, { leaseExpiresAt: Date.now() - 1000 });
+  const renewed = await page(html, '/profile', {}, { leaseExpiresAt: Date.now() - 1000, renewedUntil: Date.now() + 60000 });
+  try {
+    assert.equal(expired.w.clicked, undefined);
+    assert.equal(expired.w.document.querySelector('input').value, '');
+    assert.equal(expired.w.document.querySelector('aside').dataset.stage, 'stopped');
+    assert.equal(renewed.w.clicked, true);
+    assert.equal(renewed.w.document.querySelector('input').value, 'Test');
+  } finally { expired.dom.window.close(); renewed.dom.window.close(); }
+});
 
 test('helper fills saved fields, uses normal Next, and stops when assessment is reached', async () => {
   const p = await page('<form><label>First Name<input name="firstName" required></label><label>Last Name<input name="lastName" required></label><button type="button">Next</button></form>');
