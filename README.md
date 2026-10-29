@@ -14,6 +14,13 @@ The PC and Vercel deployment must use the same `DATABASE_URL` (database
 `amazonjobtool`). Set `AUTOMATION_MODE=worker` in `.env.local` if you also want
 the local dashboard to control this worker. Vercel always uses the worker queue.
 Deploy this version of the dashboard before using online Apply.
+Set `APP_URL` (or `WORKER_DASHBOARD_URL`) to the deployed dashboard URL on the PC.
+The worker reads the verified public feed through that dashboard and uses its
+configured `TOOL_LOGIN_EMAIL`/`TOOL_LOGIN_PASSWORD` to recheck selected shifts.
+This avoids depending on direct public API access from the PC network. The
+Amazon browser still checks signed-in shift status before proceeding. These are
+tool credentials, not Amazon credentials. If no dashboard URL is set, the worker
+uses direct public API requests.
 
 Sign into the online dashboard, save filters/profile, and enable automatic
 preparation. **PC worker connected** and its last job check appear in Application

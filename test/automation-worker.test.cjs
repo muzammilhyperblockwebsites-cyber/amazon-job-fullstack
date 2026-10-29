@@ -74,7 +74,9 @@ function setup() {
     stopBrowserTask: async () => { stops++; snapshot.stage = 'stopped'; },
     closeBrowser: async () => { closes++; }, renewBrowserLease: async () => {},
   };
-  const { AutomationWorker } = load('automation-worker', { './automation-store': store, './desktop-browser': browser, './uk-hourly-fallback': service });
+  const { AutomationWorker } = load('automation-worker', { './automation-store': store, './desktop-browser': browser, './uk-hourly-fallback': service,
+    './worker-dashboard': { workerJobs: service.fetchAllUKHourlyJobs, prepareWorkerApplication: async () => ({ applyUrl: 'https://www.jobsatamazon.co.uk/application/uk/' }) },
+  });
   const api = load('automation-api', { './automation-store': { ...store, automationDb: async () => db }, './tool-session': { authenticatedToolUser: () => authenticated ? 'test-user' : null } });
   return { db, store, api, prefs, snapshot, service, worker: new AutomationWorker(db), makeWorker: () => new AutomationWorker(db), launches: () => launches, closes: () => closes, stops: () => stops, setAuthenticated(value) { authenticated = value; } };
 }

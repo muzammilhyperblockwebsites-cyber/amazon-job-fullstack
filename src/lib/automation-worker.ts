@@ -3,7 +3,8 @@ import type { Db } from "mongodb";
 import { NextRequest } from "next/server";
 import { acquireWorker, automationDb, enqueueApplication, initializeAutomation, renewWorker, TASKS, WORKERS, type AutomationTask, type WorkerRecord } from "./automation-store";
 import { browserTask, closeBrowser, renewBrowserLease, startBrowserApplication, stopBrowserTask } from "./desktop-browser";
-import { fetchAllUKHourlyJobs, getStoredPreferences, handleAgentFallback, handleJobApplyFallback, markScheduleUnavailable, passesHardFilters, scoreJob } from "./uk-hourly-fallback";
+import { getStoredPreferences, handleAgentFallback, markScheduleUnavailable, passesHardFilters, scoreJob } from "./uk-hourly-fallback";
+import { workerJobs, prepareWorkerApplication } from "./worker-dashboard";
 
 export class AutomationWorker {
   readonly owner = randomUUID();
@@ -75,7 +76,7 @@ export class AutomationWorker {
       const prefs = await getStoredPreferences();
       this.status.autoEnabled = Boolean(prefs.autoApplyEnabled);
       if (!prefs.autoApplyEnabled) { this.status.message = "PC worker connected. Automatic preparation is disabled."; return; }
-      const { jobs } = await fetchAllUKHourlyJobs();
+      const { jobs } = await workerJobs();
       this.status.lastChecked = new Date().toISOString();
       const minimum = Math.max(0, Math.min(100, prefs.autoApplyMinScore ?? 100));
       const matching = jobs.filter(job => passesHardFilters(job, prefs) && scoreJob(job, prefs) >= minimum)
@@ -108,9 +109,7 @@ export class AutomationWorker {
       const profile = agent.profile || {};
       if (profile.aiFormFillerEnabled === false || profile.autoClickNextEnabled === false) throw new Error("Enable form filling and automatic Next in your candidate profile.");
       if (profile.cvFileName && !profile.cvBase64) throw new Error("Re-upload and save your CV before starting automation.");
-      const prepared = await handleJobApplyFallback(req, JSON.stringify(task.job));
-      const result = await prepared.json();
-      if (!prepared.ok) throw new Error(result.error || "Shift could not be verified.");
+      const result = await prepareWorkerApplication(task.job);
       const current = await tasks.findOne({ _id: task.id, active: true, stopRequested: false, owner: this.owner });
       if (!current || this.stopped || Date.now() >= this.leaseUntil - 10_000) return;
       const browser = await startBrowserApplication({ jobId: task.jobId, scheduleId: task.scheduleId, title: task.title, applyUrl: result.applyUrl, profile, leaseExpiresAt: this.leaseUntil - 10_000 }, () => markScheduleUnavailable(task.jobId, task.scheduleId));
